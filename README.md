@@ -51,12 +51,22 @@ This pulls the latest code, builds the image and starts the container. Run it ag
 
 ### Without Docker
 
-Use Python 3.13, ideally in a virtual environment:
+With [uv](https://docs.astral.sh/uv/), which also installs the right Python version:
 
 ```bash
 export DEEZER_TOKEN=... TELEGRAM_TOKEN=...
-python3.13 -m pip install -r requirements.txt
-python3.13 main.py
+uv venv
+uv pip install -r requirements.txt
+uv run main.py
+```
+
+Or with Python 3.13 and a virtual environment:
+
+```bash
+python3.13 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python main.py
 ```
 
 ## How to use it
