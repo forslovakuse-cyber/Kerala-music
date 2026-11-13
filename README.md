@@ -6,179 +6,134 @@
 
 <h4 align="center">A Telegram bot to download music from Deezer, YouTube and SoundCloud</h4>
 
-## Disclaimer
+> [!WARNING]
+> For educational purposes only. Downloading from Deezer is against **Deezer's terms of service**.
 
-:warning: For educational purposes only (or for free music)
-Please don't use this for illegal stuff.
-It's **against Deezer's terms of service**.
+## What it does
 
-## Translations
+- Search Deezer from any chat with inline mode, then download a track or a whole album.
+- Send a Deezer, YouTube or SoundCloud link to the bot to get the audio file.
+- Files come with tags and album art. FLAC is available with Deezer Premium.
 
-Your native language is not in the `langs.json` file ? Just make a pull request or send me a message !
+![Inline search results](https://user-images.githubusercontent.com/24623168/141982877-ca7589d4-fe47-4b5a-b751-6d945c21f944.png)
 
-## Usage
+![A downloaded track in Telegram](https://user-images.githubusercontent.com/24623168/141983477-b7692d78-134a-4176-98ba-d6388ac4b80b.png)
 
-- Get an `arl` cookie on Deezer for `DEEZER_TOKEN` (
-  see [this repo](https://github.com/nathom/streamrip/wiki/Finding-Your-Deezer-ARL-Cookie))
-- Create a bot on Telegram and grab a token with [Bot Father](https://t.me/botfather) (`TELEGRAM_TOKEN`)
-- Activate `Inline Mode` on BotFather for the bot you just created
+## Quick start
 
----
+You need 2 tokens:
 
-Search for music in `inline mode` :
+1. A Deezer `arl` cookie. See [how to find your Deezer ARL cookie](https://github.com/nathom/streamrip/wiki/Finding-Your-Deezer-ARL-Cookie).
+2. A Telegram bot token from [BotFather](https://t.me/botfather). In BotFather, also turn on **Inline Mode** for your bot.
 
-```
-@xxxxxxx_bot (album|track) <search>
-```
+Create a `token.env` file next to `docker-compose.yml`:
 
-![image](https://user-images.githubusercontent.com/24623168/141982877-ca7589d4-fe47-4b5a-b751-6d945c21f944.png)
-
-![image](https://user-images.githubusercontent.com/24623168/141983477-b7692d78-134a-4176-98ba-d6388ac4b80b.png)
-
-Or send a Deezer, YouTube or SoundCloud link directly.
-
-## Configuration
-
-### Docker
-
-#### Prerequisites
-
-- Docker ([Linux installation](https://docs.docker.com/engine/install/ubuntu/)
-  and [Linux post-installation steps](https://docs.docker.com/engine/install/linux-postinstall/))
-- Docker compose (should be included in the Docker installation)
-
-Create a `token.env` file with the following content, replacing the values with your own tokens :
-
-```
-DEEZER_TOKEN=abcdefghijklmnoxxxxxxxxxxxx
+```dotenv
+DEEZER_TOKEN=your_arl_cookie
 TELEGRAM_TOKEN=123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZ
-BOT_LANG=fr
+BOT_LANG=en
 ```
 
-#### Run
+Then start the bot with [Docker](https://docs.docker.com/engine/install/):
 
 ```bash
 ./update.sh
 ```
 
-> Or manually : `git pull && docker-compose up -d --build`
+This pulls the latest code, builds the image and starts the container. Run it again to update the bot.
 
-### Local usage
+### Without Docker
 
-- Add `DEEZER_TOKEN` and `TELEGRAM_TOKEN` as variable environment
-- python3.13 -m pip install -r requirements.txt
-- python3.13 main.py
+Use Python 3.13, ideally in a virtual environment:
 
-> You should use a `venv` to avoid conflicts with your system python packages
+```bash
+export DEEZER_TOKEN=... TELEGRAM_TOKEN=...
+python3.13 -m pip install -r requirements.txt
+python3.13 main.py
+```
 
-### Compressed files (zip)
+## How to use it
 
-The bot can bundle downloaded tracks into a zip archive with the cover art included.
-
-In the `token.env` file, add the following line :
+Search in any chat with inline mode. `track` is the default:
 
 ```
+@your_bot track <search>
+@your_bot album <search>
+```
+
+Pick a result, then press **Download**. You can also send a Deezer, YouTube or SoundCloud link to the bot directly.
+
+## Configuration
+
+Set these variables in `token.env`. Run `./update.sh` after each change.
+
+| Variable | Default | What it does |
+|---|---|---|
+| `DEEZER_TOKEN` | required | Deezer `arl` cookie |
+| `TELEGRAM_TOKEN` | required | Telegram bot token |
+| `BOT_LANG` | `en` | Bot language: `en`, `fr`, `de`, `es`, `pt`, `in`, `zh` or `ar` |
+| `ENABLE_FLAC` | `0` | Set to `1` for FLAC downloads (needs Deezer Premium) |
+| `FORMAT` | | Set to `zip` to send downloads as zip files, cover included |
+| `COPY_FILES_PATH` | | Folder where zip files are saved, to share them by link (see below) |
+| `FILE_LINK_TEMPLATE` | | Download link for those files, for example `https://example.com/dl/{0}` |
+| `SEND_ALBUM_COVER` | `true` | Set to `false` to stop sending the album cover with each download |
+| `MAX_RETRIES` | `5` | Download attempts per track |
+| `DEEZER_PROXY` | | HTTPS proxy for Deezer requests |
+| `YT_PLAYER_CLIENT` | `tv,web_safari,web_embedded,android_vr` | yt-dlp player clients, separated by commas |
+
+### File size limit
+
+Telegram bots can upload files up to 50 MB:
+
+- a FLAC track over this limit is sent as MP3 instead
+- zip files over the limit are split into several parts
+- YouTube and SoundCloud audio over 20 minutes is refused
+
+### Share zip files by link
+
+To avoid the 50 MB limit, the bot can save zip files to a folder and send a link instead. Serve that folder with a web server such as Nginx or Caddy.
+
+```dotenv
 FORMAT=zip
+COPY_FILES_PATH=/files
+FILE_LINK_TEMPLATE=https://example.com/dl/{0}
 ```
 
-If the `zip` file is too big (more than 50MB), the bot will split the zip file into multiple parts.
-
-### Download URL
-
-You can also make the bot move a file to a specific directory and send you the download link.
-
-In the `token.env` file, add the following line :
-
-```
-FORMAT=zip
-COPY_FILES_PATH=/path/to/your/directory
-FILE_LINK_TEMPLATE=https://yourdomain.com/download/{0}
-```
-
-The `{0}` will be replaced by the file name.
-
-I recommend using a reverse proxy to serve the files, like Nginx or Caddy.
-
-If you use `Docker`, you can mount a volume to the container and set the `COPY_FILES_PATH` to `/files`, like this :
+The bot replaces `{0}` with the file name. With Docker, mount your folder on `/files` in `docker-compose.yml`:
 
 ```yaml
 volumes:
-  - /path/to/your/directory:/files
+  - /path/to/your/folder:/files
 ```
 
-### Allow FLAC format
+## YouTube and SoundCloud limits
 
-If you have Deezer premium, you can allow the bot to download FLAC files by adding the following line in the `token.env`
-file :
+These sources work less well than Deezer. The bot uses [yt-dlp](https://github.com/yt-dlp/yt-dlp) for both.
 
-```
-ENABLE_FLAC=1
-```
+**YouTube** blocks many requests that come from servers, and asks to "sign in to confirm you're not a bot". Popular videos often still work. For the others, you need cookies from a YouTube account or a residential proxy.
 
-### Do not send album art
+**SoundCloud** only gives 30-second previews without a Go+ subscription.
 
-By default, the bot sends the album cover along with links to the album and track. To disable this, set `SEND_ALBUM_COVER` to `false` :
+### Use YouTube cookies
 
-```
-SEND_ALBUM_COVER=false
-```
+1. Export a `cookies.txt` file. See [how to pass cookies to yt-dlp](https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp).
+2. Put it in `./local_resources/cookies.txt`.
 
-### YouTube limitations
+The bot reads the file on each YouTube download, so you do not need to restart it.
 
-YouTube has deployed multiple layers of protection that affect yt-dlp:
+> [!WARNING]
+> YouTube may ban the account the cookies come from.
 
-1. **JS challenges (sig/nsig)** — stream URLs are encrypted by obfuscated JS in the YouTube player, changing with each update.
-2. **poToken (BotGuard)** — an attestation token proving the request comes from a real client (browser/mobile app).
-3. **Datacenter IP blocking** — YouTube detects server IPs and requires login ("Sign in to confirm you’re not a bot").
+## Debugging
 
-By default, yt-dlp uses `JSInterp` (a Python-based JS interpreter) which is deprecated and no longer follows YouTube changes. It still works for some very popular videos, but fails with `LOGIN_REQUIRED` on many videos from datacenter IPs.
-
-Using yt-dlp with **EJS** (a real JS runtime like Node/Deno/Bun) resolves the JS challenges but **does not solve datacenter IP blocking**. Without cookies or a residential proxy, many videos won’t work from a server.
-
-### SoundCloud limitations
-
-SoundCloud restricts full track downloads to Go+ subscribers. Without authentication, yt-dlp only retrieves ~30-second previews.
-
-#### Cookies workaround
-
-Add a `cookies.txt` in `./local_resources`.
-To generate this file, please see: <https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp>.
-
-You don’t need to restart the bot, it will automatically reload the cookies when downloading a YouTube video.
-
-> :warning: Please note that your account may be banned if you use this feature.
-
-### Other options
-
-| Variable | Default | Description |
-|---|---|---|
-| `DEEZER_PROXY` | | HTTPS proxy for Deezer requests |
-| `MAX_RETRIES` | `5` | Number of download retry attempts per track |
-| `YT_PLAYER_CLIENT` | `tv,web_safari,web_embedded,android_vr` | Comma-separated yt-dlp player clients |
-
-### Example configuration
-
-```dotenv
-# Global configuration
-BOT_LANG=en
-
-# Tokens
-DEEZER_TOKEN=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-TELEGRAM_TOKEN=1234567890:ABCDEFghijklmnopqrstuvwxyz012345678
-
-# Specific configuration
-COPY_FILES_PATH=/files
-FILE_LINK_TEMPLATE=https://example.com/dl/{0}
-FORMAT=zip
-```
-
-### Debugging
-
-> docker logs telegramusic 2>/dev/null | grep "USER_DEBUG"
+User actions are logged with a `USER_DEBUG` prefix:
 
 ```bash
-grep "USER_DEBUG"                     # All user activities
-grep "USER_DEBUG.*user_id=123456789"  # Activities for specific user ID
-grep "USER_DEBUG.*username=john"      # Activities for specific username
-grep "USER_DEBUG.*Error"              # All user-related errors
+docker logs telegramusic 2>/dev/null | grep "USER_DEBUG"                     # all user actions
+docker logs telegramusic 2>/dev/null | grep "USER_DEBUG.*user_id=123456789"  # one user
+docker logs telegramusic 2>/dev/null | grep "USER_DEBUG.*Error"              # errors only
 ```
+
+## Translations
+
+Bot messages are in `langs.json`. To add your language, open a pull request or send me a message.
