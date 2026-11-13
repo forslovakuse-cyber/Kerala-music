@@ -108,5 +108,35 @@
     "de": "Herunterladen",
     "zh": "下载",
     "ar": "تنزيل"
+  },
+  "file_too_big": {
+    "fr": "Le fichier dépasse la limite de 50 Mo de Telegram.",
+    "en": "The file is over Telegram's 50 MB limit.",
+    "es": "El archivo supera el límite de 50 MB de Telegram.",
+    "pt": "O arquivo ultrapassa o limite de 50 MB do Telegram.",
+    "in": "File melebihi batas 50 MB dari Telegram.",
+    "de": "Die Datei ist größer als das Telegram-Limit von 50 MB.",
+    "zh": "文件超过了 Telegram 的 50 MB 限制。",
+    "ar": "حجم الملف يتجاوز حد 50 ميغابايت في تيليجرام."
+  },
+  "too_long": {
+    "fr": "❌ La vidéo est trop longue (maximum {} minutes).",
+    "en": "❌ The video is too long (maximum {} minutes).",
+    "es": "❌ El vídeo es demasiado largo (máximo {} minutos).",
+    "pt": "❌ O vídeo é longo demais (máximo de {} minutos).",
+    "in": "❌ Video terlalu panjang (maksimal {} menit).",
+    "de": "❌ Das Video ist zu lang (maximal {} Minuten).",
+    "zh": "❌ 视频太长（最多 {} 分钟）。",
+    "ar": "❌ الفيديو طويل جدًا (الحد الأقصى {} دقيقة)."
+  },
+  "arl_expired": {
+    "fr": "Le token Deezer du bot a expiré",
+    "en": "The bot's Deezer token has expired",
+    "es": "El token de Deezer del bot ha caducado",
+    "pt": "O token do Deezer do bot expirou",
+    "in": "Token Deezer bot sudah kedaluwarsa",
+    "de": "Das Deezer-Token des Bots ist abgelaufen",
+    "zh": "机器人的 Deezer 令牌已过期",
+    "ar": "انتهت صلاحية رمز Deezer الخاص بالبوت"
   }
 }

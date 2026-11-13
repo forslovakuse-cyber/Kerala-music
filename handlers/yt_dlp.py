@@ -1,9 +1,12 @@
 import asyncio
+import html
 import io
 import os
+import tempfile
 import traceback
 from pathlib import Path
 
+import aioshutil
 import requests
 import yt_dlp
 from PIL import Image
@@ -15,7 +18,14 @@ from yt_dlp import YoutubeDL
 from aiogram import Router
 
 # Assuming utils provides these functions and constants
-from utils import __, is_downloading, add_downloading, remove_downloading, TMP_DIR
+from utils import (
+    HTTP_TIMEOUT,
+    TMP_DIR,
+    __,
+    add_downloading,
+    is_downloading,
+    remove_downloading,
+)
 
 print("yt-dlp version: ", yt_dlp.version.__version__)
 
@@ -38,6 +48,30 @@ SC_TMP_DIR = Path(TMP_DIR, "sc")
 # Ensure temp directories exist
 YT_TMP_DIR.mkdir(parents=True, exist_ok=True)
 SC_TMP_DIR.mkdir(parents=True, exist_ok=True)
+
+# An MP3 at 320 kbit/s reaches Telegram's 50 MB upload limit after about 20 minutes
+MAX_DURATION_SECONDS = 20 * 60
+
+
+class TooLongError(Exception):
+    pass
+
+
+def extract_and_download(ydl: YoutubeDL, url: str) -> dict | None:
+    # Read the duration first, so a long video fails before we download it.
+    # Full extraction follows redirects such as watch?v=...&list=..., which have no duration.
+    info = ydl.extract_info(url, download=False)
+    if not info:
+        return None
+    if (info.get("duration") or 0) > MAX_DURATION_SECONDS:
+        raise TooLongError()
+    return ydl.process_ie_result(info, download=True)
+
+
+def track_caption(title: str, details: str, url: str) -> str:
+    return (
+        "<b>Track: {}</b>\n{}\n\n<a href=\"{}\">" + __("track_link") + "</a>"
+    ).format(html.escape(title), html.escape(details), html.escape(url))
 
 
 def crop_center(pil_img, crop_width, crop_height):
@@ -66,10 +100,14 @@ async def get_youtube_audio(event: types.Message):
     print(f"Processing YouTube link from user {event.from_user.id}")
     if is_downloading(event.from_user.id) is False:
         add_downloading(event.from_user.id)
-        tmp_msg = await event.answer(__("downloading"))
+        tmp_msg = None
+        dl_dir = None
         try:
+            tmp_msg = await event.answer(__("downloading"))
+            dl_dir = Path(tempfile.mkdtemp(dir=YT_TMP_DIR))
             ydl_opts = {
-                "outtmpl": str(YT_TMP_DIR / "%(id)s.%(ext)s"),  # Use YT_TMP_DIR
+                # One directory per download, so 2 users fetching the same video do not share files
+                "outtmpl": str(dl_dir / "%(id)s.%(ext)s"),
                 "format": "bestaudio/best",
                 "postprocessors": [
                     {
@@ -80,6 +118,7 @@ async def get_youtube_audio(event: types.Message):
                 ],
                 "quiet": True,  # Suppress yt-dlp console output
                 "no_warnings": True,
+                "noplaylist": True,
                 "extractor_args": {"youtube": {"player_client": YT_PLAYER_CLIENT}},
             }
 
@@ -96,9 +135,7 @@ async def get_youtube_audio(event: types.Message):
             # Download file
             ydl = YoutubeDL(ydl_opts)
             # Run in executor to avoid blocking asyncio loop
-            dict_info = await asyncio.to_thread(
-                ydl.extract_info, event.text, download=True
-            )
+            dict_info = await asyncio.to_thread(extract_and_download, ydl, event.text)
 
             if not dict_info:
                 print("No information found")
@@ -116,7 +153,10 @@ async def get_youtube_audio(event: types.Message):
             image_bytes = None
             if thumb_url:
                 try:
-                    content = requests.get(thumb_url).content
+                    response = await asyncio.to_thread(
+                        requests.get, thumb_url, timeout=HTTP_TIMEOUT
+                    )
+                    content = response.content
                     image_bytes = io.BytesIO(content)
                 except Exception as img_err:
                     print(f"Error downloading/processing thumbnail: {img_err}")
@@ -136,14 +176,8 @@ async def get_youtube_audio(event: types.Message):
                 try:
                     await event.answer_photo(
                         BufferedInputFile(image_bytes.getvalue(), filename="cover.jpg"),
-                        caption=(
-                            "<b>Track: {}</b>"
-                            '\n{} - {}\n\n<a href="{}">' + __("track_link") + "</a>"
-                        ).format(
-                            track_title,
-                            uploader,
-                            upload_date_str,
-                            webpage_url,
+                        caption=track_caption(
+                            track_title, f"{uploader} - {upload_date_str}", webpage_url
                         ),
                         parse_mode="HTML",
                     )
@@ -152,24 +186,18 @@ async def get_youtube_audio(event: types.Message):
                     print(f"Error sending photo: {photo_err}")
             else:
                 # Send caption as text if no thumbnail
-                await event.answer(
-                    (
-                        "<b>Track: {}</b>"
-                        '\n{} - {}\n\n<a href="{}">' + __("track_link") + "</a>"
-                    ).format(
-                        track_title,
-                        uploader,
-                        upload_date_str,
-                        webpage_url,
-                    ),
-                    parse_mode="HTML",
-                    disable_web_page_preview=True,
-                )
+                try:
+                    await event.answer(
+                        track_caption(
+                            track_title, f"{uploader} - {upload_date_str}", webpage_url
+                        ),
+                        parse_mode="HTML",
+                        disable_web_page_preview=True,
+                    )
+                except Exception as text_err:
+                    print(f"Error sending caption: {text_err}")
 
-            # Delete user message
-            await event.delete()
-
-            location = YT_TMP_DIR / f"{track_id}.mp3"
+            location = dl_dir / f"{track_id}.mp3"
 
             # Check if file exists
             if not location.exists():
@@ -231,23 +259,32 @@ async def get_youtube_audio(event: types.Message):
                 disable_notification=True,
             )
             try:
-                os.remove(location)
-            except FileNotFoundError:
-                pass
+                await event.delete()
+            except Exception as delete_err:
+                print(f"Could not delete original message: {delete_err}")
+        except TooLongError:
+            await event.answer(__("too_long").format(MAX_DURATION_SECONDS // 60))
         except yt_dlp.utils.DownloadError as dl_err:
             print(f"yt-dlp download error: {dl_err}")
             await event.answer(__("download_error_specific").format(str(dl_err)))
         except Exception as e:
             traceback.print_exc()
             await event.answer(
-                __("download_error") + f"\n<code>{e}</code>", parse_mode="HTML"
+                __("download_error") + f"\n<code>{html.escape(str(e))}</code>",
+                parse_mode="HTML",
             )
         finally:
-            await tmp_msg.delete()
+            if dl_dir:
+                await aioshutil.rmtree(dl_dir, ignore_errors=True)
             try:
                 remove_downloading(event.from_user.id)
             except ValueError:
                 pass
+            if tmp_msg:
+                try:
+                    await tmp_msg.delete()
+                except Exception as delete_err:
+                    print(f"Could not delete progress message: {delete_err}")
     else:
         tmp_err_msg = await event.answer(__("running_download"))
         await event.delete()
@@ -267,10 +304,13 @@ async def get_soundcloud_audio(event: types.Message):
     print(f"Processing SoundCloud link from user {event.from_user.id}")
     if is_downloading(event.from_user.id) is False:
         add_downloading(event.from_user.id)
-        tmp_msg = await event.answer(__("downloading"))
+        tmp_msg = None
+        dl_dir = None
         try:
+            tmp_msg = await event.answer(__("downloading"))
+            dl_dir = Path(tempfile.mkdtemp(dir=SC_TMP_DIR))
             ydl_opts = {
-                "outtmpl": str(SC_TMP_DIR / "%(id)s.%(ext)s"),  # Use SC_TMP_DIR
+                "outtmpl": str(dl_dir / "%(id)s.%(ext)s"),
                 "format": "bestaudio/best",
                 "postprocessors": [
                     {
@@ -281,6 +321,7 @@ async def get_soundcloud_audio(event: types.Message):
                 ],
                 "quiet": True,  # Suppress yt-dlp console output
                 "no_warnings": True,
+                "noplaylist": True,
             }
 
             # Cookies generally aren't needed for public SoundCloud tracks,
@@ -290,9 +331,7 @@ async def get_soundcloud_audio(event: types.Message):
             # Download file
             ydl = YoutubeDL(ydl_opts)
             # Run in executor to avoid blocking asyncio loop
-            dict_info = await asyncio.to_thread(
-                ydl.extract_info, event.text, download=True
-            )
+            dict_info = await asyncio.to_thread(extract_and_download, ydl, event.text)
 
             if not dict_info:
                 print("No information found")
@@ -314,7 +353,10 @@ async def get_soundcloud_audio(event: types.Message):
             image_bytes = None
             if thumb_url:
                 try:
-                    content = requests.get(thumb_url).content
+                    response = await asyncio.to_thread(
+                        requests.get, thumb_url, timeout=HTTP_TIMEOUT
+                    )
+                    content = response.content
                     image_bytes = io.BytesIO(content)
                 except Exception as img_err:
                     print(
@@ -326,13 +368,8 @@ async def get_soundcloud_audio(event: types.Message):
                 try:
                     await event.answer_photo(
                         BufferedInputFile(image_bytes.getvalue(), filename="cover.jpg"),
-                        caption=(
-                            "<b>Track: {}</b>"
-                            '\nArtist: {}\n\n<a href="{}">' + __("track_link") + "</a>"
-                        ).format(
-                            track_title,
-                            uploader,
-                            webpage_url,
+                        caption=track_caption(
+                            track_title, f"Artist: {uploader}", webpage_url
                         ),
                         parse_mode="HTML",
                     )
@@ -341,23 +378,16 @@ async def get_soundcloud_audio(event: types.Message):
                     print(f"Error sending SoundCloud photo: {photo_err}")
             else:
                 # Send caption as text if no thumbnail
-                await event.answer(
-                    (
-                        "<b>Track: {}</b>"
-                        '\nArtist: {}\n\n<a href="{}">' + __("track_link") + "</a>"
-                    ).format(
-                        track_title,
-                        uploader,
-                        webpage_url,
-                    ),
-                    parse_mode="HTML",
-                    disable_web_page_preview=True,
-                )
+                try:
+                    await event.answer(
+                        track_caption(track_title, f"Artist: {uploader}", webpage_url),
+                        parse_mode="HTML",
+                        disable_web_page_preview=True,
+                    )
+                except Exception as text_err:
+                    print(f"Error sending SoundCloud caption: {text_err}")
 
-            # Delete user message
-            await event.delete()
-
-            location = SC_TMP_DIR / f"{track_id}.mp3"
+            location = dl_dir / f"{track_id}.mp3"
 
             # Check if file exists
             if not location.exists():
@@ -419,23 +449,32 @@ async def get_soundcloud_audio(event: types.Message):
                 disable_notification=True,
             )
             try:
-                os.remove(location)
-            except FileNotFoundError:
-                pass
+                await event.delete()
+            except Exception as delete_err:
+                print(f"Could not delete original message: {delete_err}")
+        except TooLongError:
+            await event.answer(__("too_long").format(MAX_DURATION_SECONDS // 60))
         except yt_dlp.utils.DownloadError as dl_err:
             print(f"yt-dlp download error (SoundCloud): {dl_err}")
             await event.answer(__("download_error_specific").format(str(dl_err)))
         except Exception as e:
             traceback.print_exc()
             await event.answer(
-                __("download_error") + f"\n<code>{e}</code>", parse_mode="HTML"
+                __("download_error") + f"\n<code>{html.escape(str(e))}</code>",
+                parse_mode="HTML",
             )
         finally:
-            await tmp_msg.delete()
+            if dl_dir:
+                await aioshutil.rmtree(dl_dir, ignore_errors=True)
             try:
                 remove_downloading(event.from_user.id)
             except ValueError:
                 pass
+            if tmp_msg:
+                try:
+                    await tmp_msg.delete()
+                except Exception as delete_err:
+                    print(f"Could not delete progress message: {delete_err}")
     else:
         tmp_err_msg = await event.answer(__("running_download"))
         await event.delete()

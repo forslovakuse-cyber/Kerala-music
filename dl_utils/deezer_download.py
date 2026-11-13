@@ -19,6 +19,8 @@ from mutagen.flac import FLAC, Picture
 from mutagen.id3 import APIC, TALB, TDRC, TIT2, TPOS, TPE1, TPE2, TRCK, PictureType
 from mutagen.mp3 import MP3
 
+from utils import HTTP_TIMEOUT
+
 # BEGIN TYPES
 TYPE_TRACK = "track"
 TYPE_ALBUM = "album"
@@ -29,21 +31,36 @@ TYPE_ALBUM_TRACK = "album_track"  # used for listing songs of an album
 session = None
 license_token = {}
 sound_format = ""
+# Set when the last init failed because the ARL is expired, so later calls can say why
+arl_expired = False
 USER_AGENT = "Mozilla/5.0 (X11; Linux i686; rv:135.0) Gecko/20100101 Firefox/135.0"
 
 
-def get_user_data() -> tuple[Any, Any] | None:
-    if not session:
-        raise DeezerApiException("Error: Deezer session not initialized")
+def require_session() -> requests.Session:
+    if session:
+        return session
+    if arl_expired:
+        raise DeezerArlExpiredException("Error: Deezer ARL token expired, update DEEZER_TOKEN")
+    raise DeezerApiException("Error: Deezer session not initialized")
+
+
+def get_user_data(sess: requests.Session | None = None) -> tuple[Any, Any] | None:
+    sess = sess or require_session()
 
     try:
-        user_data = session.get(
-            "https://www.deezer.com/ajax/gw-light.php?method=deezer.getUserData&input=3&api_version=1.0&api_token="
+        user_data = sess.get(
+            "https://www.deezer.com/ajax/gw-light.php?method=deezer.getUserData&input=3&api_version=1.0&api_token=",
+            timeout=HTTP_TIMEOUT,
         )
         user_data_json = user_data.json()["results"]
+        # An expired ARL still gets a guest license token, so check we are logged in
+        if str(user_data_json["USER"].get("USER_ID", "0")) == "0":
+            raise DeezerArlExpiredException(
+                "Error: Deezer ARL token expired or invalid (logged in as guest), update DEEZER_TOKEN"
+            )
         options = user_data_json["USER"]["OPTIONS"]
         return options["license_token"], options["web_sound_quality"]
-    except (requests.exceptions.RequestException, KeyError) as e:
+    except (requests.exceptions.RequestException, KeyError, ValueError) as e:
         print(f"ERROR: Could not get license token: {e}")
         return None
 
@@ -90,7 +107,7 @@ def get_file_format(s: dict) -> tuple[str, str]:
 
 # quality is mp3 or flac
 def init_deezer_session(proxy_server: str, quality: str) -> None:
-    global session, license_token
+    global session, license_token, arl_expired
 
     deezer_token = os.environ.get("DEEZER_TOKEN")
     if not deezer_token:
@@ -111,17 +128,26 @@ def init_deezer_session(proxy_server: str, quality: str) -> None:
         "Referer": "https://www.deezer.com/login",
         "DNT": "1",
     }
-    session = requests.session()
-    session.headers.update(header)
-    session.cookies.update({"arl": deezer_token, "comeback": "1"})
+    # Build the new session fully before publishing it: download threads read the globals
+    new_session = requests.session()
+    new_session.headers.update(header)
+    new_session.cookies.update({"arl": deezer_token, "comeback": "1"})
     if len(proxy_server.strip()) > 0:
         print(f"Using proxy {proxy_server}")
-        session.proxies.update({"https": proxy_server})
-    user_data = get_user_data()
+        new_session.proxies.update({"https": proxy_server})
+    try:
+        user_data = get_user_data(new_session)
+    except DeezerArlExpiredException:
+        arl_expired = True
+        # Drop the old session too, so downloads report the expired token instead of failing vaguely
+        session = None
+        raise
     if user_data is None:
-        raise Exception("Error: Failed to get user data")
+        raise DeezerApiException("Error: Failed to get user data")
+    arl_expired = False
     license_token, web_sound_quality = user_data
     set_default_song_quality(quality, web_sound_quality)
+    session = new_session
 
 
 class Deezer404Exception(Exception):
@@ -133,6 +159,10 @@ class Deezer403Exception(Exception):
 
 
 class DeezerApiException(Exception):
+    pass
+
+
+class DeezerArlExpiredException(DeezerApiException):
     pass
 
 
@@ -275,8 +305,8 @@ def write_song_metadata(output_file: str, song: dict, is_flac: bool) -> None:
     set_metadata(audio, "album", song.get("ALB_TITLE"))
     set_metadata(audio, "tracknumber", song.get("TRACK_NUMBER"))
     set_metadata(audio, "discnumber", song.get("DISK_NUMBER"))
-    if "album_Data" in globals() and album_Data and "PHYSICAL_RELEASE_DATE" in album_Data:
-        set_metadata(audio, "date", album_Data.get("PHYSICAL_RELEASE_DATE", "")[:4])
+    if song.get("PHYSICAL_RELEASE_DATE"):
+        set_metadata(audio, "date", song["PHYSICAL_RELEASE_DATE"][:4])
     try:
         set_metadata(audio, "picture", downloadpicture(song["ALB_PICTURE"]))
     except Exception as e:
@@ -284,14 +314,17 @@ def write_song_metadata(output_file: str, song: dict, is_flac: bool) -> None:
     set_metadata(
         audio, "albumartist", song.get("ALB_ART_NAME", song.get("ART_NAME"))
     )
-    audio.save()
+    # ID3v2.3 for MP3: Windows and many players cannot read v2.4. FLAC uses Vorbis comments.
+    if is_flac:
+        audio.save()
+    else:
+        # Turns v2.4-only frames such as TDRC (date) into their v2.3 forms
+        audio.tags.update_to_v23()
+        audio.save(v2_version=3)
 
 
 def downloadpicture(pic_idid):
-    if not session:
-        raise DeezerApiException("Error: Deezer session not initialized")
-
-    resp = session.get(get_picture_link(pic_idid))
+    resp = require_session().get(get_picture_link(pic_idid), timeout=HTTP_TIMEOUT)
     resp.raise_for_status()
     return resp.content
 
@@ -319,6 +352,8 @@ def get_song_url(track_token: str, format: str) -> str:
                 ],
             },
             headers={"User-Agent": USER_AGENT},
+            proxies=require_session().proxies,
+            timeout=HTTP_TIMEOUT,
         )
         response.raise_for_status()
         data = response.json()
@@ -329,7 +364,13 @@ def get_song_url(track_token: str, format: str) -> str:
     except requests.exceptions.RequestException as e:
         raise RuntimeError(f"Could not retrieve song URL: {e}")
 
-    if not data.get("data") or "errors" in data["data"][0]:
+    if not data.get("data"):
+        # Top-level errors are about the request itself (license token), not the track
+        if data.get("errors"):
+            raise DeezerApiException(f"Could not get download url from API: {data['errors']}")
+        raise RuntimeError(f"Could not get download url: API returned no data: {data}")
+
+    if "errors" in data["data"][0]:
         raise RuntimeError(
             f"Could not get download url from API: {data['data'][0]['errors'][0]['message']}"
         )
@@ -350,8 +391,7 @@ def download_song(song: dict, deezer_format: str, output_file: str) -> None:
     assert type(song) is dict, "song must be a dict"
     assert type(output_file) is str, "output_file must be a str"
 
-    if not session:
-        raise DeezerApiException("Error: Deezer session not initialized")
+    sess = require_session()
 
     url = None
     try:
@@ -382,7 +422,7 @@ def download_song(song: dict, deezer_format: str, output_file: str) -> None:
     key = calcbfkey(song["SNG_ID"])
     is_flac = deezer_format == "FLAC"
     try:
-        with session.get(url, stream=True) as response:
+        with sess.get(url, stream=True, timeout=HTTP_TIMEOUT) as response:
             response.raise_for_status()
             with open(output_file, "w+b") as fo:
                 decryptfile(response, key, fo)
@@ -406,12 +446,10 @@ def get_song_infos_from_deezer_website(search_type, id):
     # 2. Deezer gives you a 404: https://www.deezer.com/de/track/68925038
     # Deezer403Exception if we are not logged in
 
-    if not session:
-        raise DeezerApiException("Error: Deezer session not initialized")
+    sess = require_session()
 
     url = "https://www.deezer.com/us/{}/{}".format(search_type, id)
-    resp = session.get(url)
-    print(url)
+    resp = sess.get(url, timeout=HTTP_TIMEOUT)
     if resp.status_code == 404:
         raise Deezer404Exception("ERROR: Got a 404 for {} from Deezer".format(url))
     if "MD5_ORIGIN" not in resp.text:
@@ -428,14 +466,20 @@ def get_song_infos_from_deezer_website(search_type, id):
         regex = re.search(r'{"DATA":.*', script)
         if regex:
             DZR_APP_STATE = json.loads(regex.group())
-            global album_Data
-            album_Data = DZR_APP_STATE.get("DATA")
+            page_data = DZR_APP_STATE["DATA"]
             if (
                 DZR_APP_STATE["DATA"]["__TYPE__"] == "playlist"
                 or DZR_APP_STATE["DATA"]["__TYPE__"] == "album"
             ):
                 # songs if you searched for album/playlist
                 for song in DZR_APP_STATE["SONGS"]["data"]:
+                    # One album artist for every track, so players keep compilations grouped
+                    if page_data["__TYPE__"] == "album":
+                        if page_data.get("ART_NAME"):
+                            song["ALB_ART_NAME"] = page_data["ART_NAME"]
+                        # The album date, not each track's, so all tracks share one year
+                        if page_data.get("PHYSICAL_RELEASE_DATE"):
+                            song["PHYSICAL_RELEASE_DATE"] = page_data["PHYSICAL_RELEASE_DATE"]
                     songs.append(song)
             elif DZR_APP_STATE["DATA"]["__TYPE__"] == "song":
                 # just one song on that page
@@ -444,8 +488,9 @@ def get_song_infos_from_deezer_website(search_type, id):
                 alb_id = DZR_APP_STATE["DATA"].get("ALB_ID")
                 if alb_id:
                     try:
-                        alb_resp = session.get(
-                            "https://www.deezer.com/us/{}/{}".format(TYPE_ALBUM, alb_id)
+                        alb_resp = sess.get(
+                            "https://www.deezer.com/us/{}/{}".format(TYPE_ALBUM, alb_id),
+                            timeout=HTTP_TIMEOUT,
                         )
                         alb_parser = ScriptExtractor()
                         alb_parser.feed(alb_resp.text)
@@ -469,8 +514,7 @@ def deezer_search(search, search_type):
     # search_type: either one of the constants: TYPE_TRACK|TYPE_ALBUM|TYPE_ALBUM_TRACK (TYPE_PLAYLIST is not supported)
     # return: list of dicts (keys depend on search_type)
 
-    if not session:
-        raise DeezerApiException("Error: Deezer session not initialized")
+    sess = require_session()
 
     if search_type not in [TYPE_TRACK, TYPE_ALBUM, TYPE_ALBUM_TRACK]:
         print("ERROR: search_type is wrong: {}".format(search_type))
@@ -480,8 +524,9 @@ def deezer_search(search, search_type):
         if search_type == TYPE_ALBUM_TRACK:
             data = get_song_infos_from_deezer_website(TYPE_ALBUM, search)
         else:
-            resp = session.get(
-                "https://api.deezer.com/search/{}?q={}".format(search_type, search)
+            resp = sess.get(
+                "https://api.deezer.com/search/{}?q={}".format(search_type, search),
+                timeout=HTTP_TIMEOUT,
             )
             resp.raise_for_status()
             data = resp.json()

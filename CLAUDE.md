@@ -45,7 +45,7 @@ No test suite exists.
 - `handlers/yt_dlp.py` — YouTube and SoundCloud handlers via yt-dlp. Two separate routers (`youtube_router`, `soundcloud_router`).
 
 **Download core:**
-- `dl_utils/deezer_download.py` — Deezer session management (ARL cookie auth), Blowfish decryption of streams, metadata tagging (mutagen), search API. **Forked from [kmille/deezer-downloader](https://github.com/kmille/deezer-downloader)** with local modifications: `get_file_format()` with per-track quality fallback (FLAC → MP3_320 → MP3_128), `deezer_format` passed as parameter instead of relying on the global, `DeezerApiException` vs `RuntimeError` distinction for session auto-refresh, and `ALB_ART_NAME` fetch in `get_song_infos_from_deezer_website`. When syncing with upstream, preserve these differences. Uses global `session` and `license_token` state.
+- `dl_utils/deezer_download.py` — Deezer session management (ARL cookie auth), Blowfish decryption of streams, metadata tagging (mutagen), search API. **Forked from [kmille/deezer-downloader](https://github.com/kmille/deezer-downloader)** with local modifications: `get_file_format()` with per-track quality fallback (FLAC → MP3_320 → MP3_128), `deezer_format` passed as parameter instead of relying on the global, `DeezerApiException` vs `RuntimeError` distinction for session auto-refresh, `ALB_ART_NAME` fetch in `get_song_infos_from_deezer_website`, expired ARL detection (`USER.USER_ID == 0` raises `DeezerArlExpiredException`, a `DeezerApiException`), `require_session()`, HTTP timeouts on every request, and `DEEZER_PROXY` passed to the `get_url` call. When syncing with upstream, preserve these differences. Uses global `session` and `license_token` state: `init_deezer_session` builds the new session first and only then replaces the globals, so download threads never see a half-built session.
 - `dl_utils/deezer_utils.py` — Filename sanitization and audio duration helpers.
 
 **Shared state:** `utils.py` — i18n via `langs.json` (the `__()` function), per-user download lock (`DOWNLOADING_USERS` list), `TMP_DIR` constant.
@@ -53,9 +53,14 @@ No test suite exists.
 ## Key Design Patterns
 
 - Deezer downloads use Blowfish CBC decryption with a per-song key derived from `SNG_ID`. Every third 2048-byte block is encrypted.
-- The Deezer session auto-refreshes after `DEEZER_SESSION_REINIT_THRESHOLD` consecutive failures (default 3).
-- Album tracks download concurrently via `asyncio.gather`, each with independent retry loops.
-- Synchronous Deezer/yt-dlp calls are wrapped in `asyncio.to_thread` / `run_in_executor` to avoid blocking the event loop.
+- The Deezer session auto-refreshes after `DEEZER_SESSION_REINIT_THRESHOLD` consecutive failures (default 3). Refreshes run one at a time, and a refresh asked for while another was running is skipped. A failed refresh is logged and the retry loop goes on.
+- An expired ARL does not stop the bot at startup: it logs an error, downloads fail with a clear message, and inline search shows that the token expired.
+- Album tracks download in parallel via `asyncio.gather`, each with its own retry loop, at most `ALBUM_DOWNLOAD_CONCURRENCY` (4) at a time.
+- Every blocking call in async code runs in a thread (`asyncio.to_thread` / `run_in_executor`): Deezer page and stream downloads, Deezer API metadata and covers, zip creation, yt-dlp.
+- Every HTTP request uses `HTTP_TIMEOUT` from `utils.py` (connect 10 s, read 60 s per read, so long streams still work).
+- Each download gets its own temp directory (`tempfile.mkdtemp` under `tmp/deezer/`), so 2 users can download the same item at once.
+- Without `FORMAT=zip`, a FLAC track too big for Telegram's 50 MB upload limit is downloaded as MP3 instead. YouTube videos over 20 minutes are refused before download for the same reason.
+- Albums are sent as media groups of up to 10 tracks, sorted by disc then track number.
 - Output format is controlled by `FORMAT=zip` env var; when set, tracks are bundled in zip archives (auto-split at 48MB for Telegram's limit).
 
 ## Environment Variables

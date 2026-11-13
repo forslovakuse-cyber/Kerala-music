@@ -7,6 +7,12 @@ DOWNLOADING_USERS = []
 
 TMP_DIR = "tmp"
 
+# (connect, read) in seconds. The read timeout applies to each read, so long streams still work.
+HTTP_TIMEOUT = (10, 60)
+
+# Telegram bots cannot upload files over 50 MB
+TELEGRAM_MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+
 
 if LANG is not None:
     print("Lang : " + LANG)

@@ -1,11 +1,15 @@
 import asyncio
 import functools
 import hashlib
+import html
 import math
 import os
 import re
 import ssl
+import tempfile
+import time
 import traceback
+from contextlib import suppress
 from io import BytesIO
 from pathlib import Path
 from urllib.parse import quote
@@ -35,6 +39,7 @@ from dl_utils.deezer_download import (
     TYPE_TRACK,
     Deezer403Exception,
     DeezerApiException,
+    DeezerArlExpiredException,
     deezer_search,
     download_song,
     get_artists,
@@ -44,6 +49,8 @@ from dl_utils.deezer_download import (
 )
 from dl_utils.deezer_utils import clean_filename, get_audio_duration
 from utils import (
+    HTTP_TIMEOUT,
+    TELEGRAM_MAX_UPLOAD_BYTES,
     TMP_DIR,
     __,
     add_downloading,
@@ -63,7 +70,12 @@ DEEZER_PROXY = os.environ.get("DEEZER_PROXY", "").strip()
 print("Default quality: " + DEFAULT_QUALITY)
 if DEEZER_PROXY:
     print(f"Using Deezer proxy: {DEEZER_PROXY}")
-init_deezer_session(DEEZER_PROXY, DEFAULT_QUALITY)
+try:
+    init_deezer_session(DEEZER_PROXY, DEFAULT_QUALITY)
+except DeezerArlExpiredException as e:
+    print(f"ERROR: Deezer ARL expired, Deezer downloads will fail until DEEZER_TOKEN is updated: {e}")
+except Exception as e:
+    print(f"ERROR: Could not initialise the Deezer session, will retry on failures: {e}")
 
 try:
     DEEZER_SESSION_REINIT_THRESHOLD = int(
@@ -89,14 +101,24 @@ API_URL = "https://api.deezer.com"
 API_TRACK = API_URL + "/track/%s"
 API_ALBUM = API_URL + "/album/%s"
 
-TRACK_REGEX = r"https?://(?:www\.)?deezer\.com/([a-z]*/)?track/(\d+)/?$"
-ALBUM_REGEX = r"https?://(?:www\.)?deezer\.com/([a-z]*/)?album/(\d+)/?$"
+TRACK_REGEX = r"https?://(?:www\.)?deezer\.com/([a-z]*/)?track/(\d+)/?(?:[?#]\S*)?$"
+ALBUM_REGEX = r"https?://(?:www\.)?deezer\.com/([a-z]*/)?album/(\d+)/?(?:[?#]\S*)?$"
 PLAYLIST_REGEX = r"https?://(?:www\.)?deezer\.com/([a-z]*/)?playlist/(\d+)/?$"  # Note: Playlist handling not fully implemented
 
 COPY_FILES_PATH = os.environ.get("COPY_FILES_PATH")
 FILE_LINK_TEMPLATE = os.environ.get("FILE_LINK_TEMPLATE")
+ZIP_SERVED_OVER_HTTP = os.environ.get("FORMAT") == "zip" and bool(
+    COPY_FILES_PATH and FILE_LINK_TEMPLATE
+)
+
+# Album tracks download in parallel threads; keep the number low so Deezer does not throttle us
+ALBUM_DOWNLOAD_CONCURRENCY = 4
+# Room for the cover and tags written into the file after download
+FLAC_SIZE_MARGIN_BYTES = 2 * 1024 * 1024
+TELEGRAM_MEDIA_GROUP_MAX = 10
 
 _session_refresh_lock = None  # Lazily initialized asyncio.Lock
+_last_session_refresh = 0.0
 _bot_username = None
 
 
@@ -117,13 +139,68 @@ def _get_session_refresh_lock():
 
 async def refresh_deezer_session(reason: str):
     """Reinitialize Deezer session in a thread-safe way."""
+    global _last_session_refresh
+    requested_at = time.monotonic()
     lock = _get_session_refresh_lock()
     if lock.locked():
         print(f"Waiting for ongoing Deezer session refresh ({reason})")
     async with lock:
+        # Album tracks often fail together: one refresh is enough for all of them
+        if _last_session_refresh > requested_at:
+            print(f"Deezer session was just refreshed, skipping ({reason})")
+            return
         print(f"Reinitializing Deezer session ({reason})...")
-        await asyncio.to_thread(init_deezer_session, DEEZER_PROXY, DEFAULT_QUALITY)
-        print("Deezer session refreshed.")
+        try:
+            await asyncio.to_thread(init_deezer_session, DEEZER_PROXY, DEFAULT_QUALITY)
+            print("Deezer session refreshed.")
+        except Exception as e:
+            # Let the retry loop go on and report the download error
+            print(f"ERROR: Deezer session refresh failed: {e}")
+        _last_session_refresh = time.monotonic()
+
+
+def user_error_message(e: Exception) -> str:
+    if isinstance(e, DeezerArlExpiredException):
+        return __("arl_expired")
+    return str(e) or "An unknown error occurred."
+
+
+def pick_file_format(track_infos: dict) -> tuple[str, str]:
+    file_extension, deezer_format = get_file_format(track_infos)
+    # Each track, alone or inside a zip part, must fit in Telegram's upload limit.
+    # Zips served over HTTP have no such limit.
+    flac_size = int(track_infos.get("FILESIZE_FLAC", 0) or 0)
+    if (
+        deezer_format == "FLAC"
+        and not ZIP_SERVED_OVER_HTTP
+        and flac_size > TELEGRAM_MAX_UPLOAD_BYTES - FLAC_SIZE_MARGIN_BYTES
+    ):
+        print(f"FLAC too big for Telegram ({flac_size} bytes), using MP3 instead")
+        if int(track_infos.get("FILESIZE_MP3_320", 0) or 0) > 0:
+            return ".mp3", "MP3_320"
+        return ".mp3", "MP3_128"
+    return file_extension, deezer_format
+
+
+def track_sort_key(track: dict) -> tuple[int, int]:
+    def as_int(value, default):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    return as_int(track.get("DISK_NUMBER"), 1), as_int(track.get("TRACK_NUMBER"), 999)
+
+
+def chunked(items: list, size: int) -> list[list]:
+    return [items[i : i + size] for i in range(0, len(items), size)]
+
+
+def make_download_dir(kind: str, item_id) -> Path:
+    # One directory per download, so 2 users fetching the same item do not share files
+    parent = Path(TMP_DIR) / "deezer" / kind
+    parent.mkdir(parents=True, exist_ok=True)
+    return Path(tempfile.mkdtemp(prefix=f"{item_id}_", dir=parent))
 
 
 async def maybe_refresh_deezer_session(
@@ -149,14 +226,14 @@ async def maybe_refresh_deezer_session(
 
 async def download_track(track_id, retries=MAX_RETRIES):
     """Downloads a single track from Deezer using imported functions."""
-    tmp_track_base_dir = (
-        None  # Define outside the try/except to avoid "possibly unbound" errors
-    )
+    tmp_track_base_dir = make_download_dir("track", track_id)
 
     for attempt in range(retries):
         try:
             # Fetch track metadata from Deezer website (may include download details)
-            track_infos = get_song_infos_from_deezer_website("track", track_id)
+            track_infos = await asyncio.to_thread(
+                get_song_infos_from_deezer_website, "track", track_id
+            )
             if not track_infos:
                 print(f"Attempt {attempt + 1}: Could not get track info for {track_id}")
                 if attempt < retries - 1:
@@ -176,19 +253,15 @@ async def download_track(track_id, retries=MAX_RETRIES):
                         f"Empty track info list received for track {track_id}"
                     )
 
-            file_extension, deezer_format = get_file_format(track_infos)
-
-            # Create a temporary directory for this track
-            tmp_track_base_dir = Path(TMP_DIR) / "deezer" / "track" / str(track_id)
-            tmp_track_base_dir.mkdir(parents=True, exist_ok=True)
+            file_extension, deezer_format = pick_file_format(track_infos)
 
             # Determine the expected final file path within our base dir
             song_path = tmp_track_base_dir / f"{track_id}{file_extension}"
 
             # Perform the actual download
-            download_song(
-                track_infos, deezer_format, str(song_path)
-            )  # download_song expects string path
+            await asyncio.to_thread(
+                download_song, track_infos, deezer_format, str(song_path)
+            )
 
             # Check if download was successful (e.g., file exists and has size)
             if not song_path.exists() or song_path.stat().st_size == 0:
@@ -265,15 +338,16 @@ async def download_album(album_id, retries=MAX_RETRIES):
     # --- Retry fetching album metadata ---
     while album_info_attempt < retries:
         try:
-            album_tracks_infos = get_song_infos_from_deezer_website("album", album_id)
+            album_tracks_infos = await asyncio.to_thread(
+                get_song_infos_from_deezer_website, "album", album_id
+            )
             if not album_tracks_infos:
                 raise ValueError(
                     f"Could not get album info for {album_id} (empty list received)"
                 )
 
             # Create a temporary directory for this album download ONCE after successful metadata fetch
-            tmp_download_dir = Path(TMP_DIR) / "deezer" / "album" / str(album_id)
-            tmp_download_dir.mkdir(parents=True, exist_ok=True)
+            tmp_download_dir = make_download_dir("album", album_id)
             print(
                 f"Album metadata fetched successfully. Download dir: {tmp_download_dir}"
             )
@@ -308,11 +382,12 @@ async def download_album(album_id, retries=MAX_RETRIES):
     # --- Download individual tracks with retries ---
     downloaded_tracks_details = []
     tasks = []
+    download_slots = asyncio.Semaphore(ALBUM_DOWNLOAD_CONCURRENCY)
 
     # Prepare download tasks for each track
     for i, track_infos in enumerate(album_tracks_infos):
         track_sng_id = track_infos.get("SNG_ID", f"album_{album_id}_track_{i}")
-        file_extension, deezer_format = get_file_format(track_infos)
+        file_extension, deezer_format = pick_file_format(track_infos)
         # Define the final path within the album's download directory
         song_path = tmp_download_dir / f"{track_sng_id}{file_extension}"
 
@@ -322,8 +397,8 @@ async def download_album(album_id, retries=MAX_RETRIES):
             track_id = ti.get("SNG_ID", "N/A")
             for attempt in range(track_retries):
                 try:
-                    # Ensure download_song doesn't create its own conflicting temp dirs if possible
-                    download_song(ti, df, str(sp))  # download_song expects string path
+                    async with download_slots:
+                        await asyncio.to_thread(download_song, ti, df, str(sp))
 
                     if not sp.exists() or sp.stat().st_size == 0:
                         # Clean up potentially empty file before retrying
@@ -421,7 +496,7 @@ async def download_album(album_id, retries=MAX_RETRIES):
 def get_track_metadata_from_api(track_id):
     """Gets track metadata from the official Deezer API."""
     try:
-        response = requests.get(API_TRACK % quote(str(track_id)))
+        response = requests.get(API_TRACK % quote(str(track_id)), timeout=HTTP_TIMEOUT)
         response.raise_for_status()  # Raise an exception for bad status codes
         track_json = response.json()
 
@@ -437,7 +512,7 @@ def get_track_metadata_from_api(track_id):
         )
 
         # Fetch cover image data
-        cover_response = requests.get(cover_url, stream=True)
+        cover_response = requests.get(cover_url, timeout=HTTP_TIMEOUT)
         cover_response.raise_for_status()
         cover_data = cover_response.content  # Read content directly
 
@@ -448,7 +523,7 @@ def get_track_metadata_from_api(track_id):
             year = release_date_str.split("-")[0]
             # Format date as DD/MM/YYYY
             release_date_formatted = "/".join(reversed(release_date_str.split("-")))
-        except:
+        except AttributeError:
             year = "0000"
             release_date_formatted = "00/00/0000"
 
@@ -496,7 +571,7 @@ def get_album_metadata_from_api(album_id):
     """Gets album and its tracks' metadata from the official Deezer API."""
     try:
         # Fetch main album info
-        album_response = requests.get(API_ALBUM % quote(str(album_id)))
+        album_response = requests.get(API_ALBUM % quote(str(album_id)), timeout=HTTP_TIMEOUT)
         album_response.raise_for_status()
         album_json = album_response.json()
         if "error" in album_json:
@@ -504,7 +579,8 @@ def get_album_metadata_from_api(album_id):
 
         # Fetch track list (handle pagination if necessary, though 1000 limit is high)
         tracks_response = requests.get(
-            API_ALBUM % quote(str(album_id)) + "/tracks?limit=1000"
+            API_ALBUM % quote(str(album_id)) + "/tracks?limit=1000",
+            timeout=HTTP_TIMEOUT,
         )
         tracks_response.raise_for_status()
         tracks_json = tracks_response.json()
@@ -526,7 +602,7 @@ def get_album_metadata_from_api(album_id):
         )
 
         # Fetch cover image data
-        cover_response = requests.get(cover_url, stream=True)
+        cover_response = requests.get(cover_url, timeout=HTTP_TIMEOUT)
         cover_response.raise_for_status()
         cover_data = cover_response.content
 
@@ -535,7 +611,7 @@ def get_album_metadata_from_api(album_id):
         try:
             year = release_date_str.split("-")[0]
             release_date_formatted = "/".join(reversed(release_date_str.split("-")))
-        except:
+        except AttributeError:
             year = "0000"
             release_date_formatted = "00/00/0000"
 
@@ -594,6 +670,10 @@ def make_audio_thumbnail(cover_data: bytes) -> bytes | None:
         return None
 
 
+def _html_fields(metadata, *keys):
+    return {k: html.escape(str(metadata.get(k) or "")) for k in keys}
+
+
 def get_track_caption(metadata):
     """Generates caption for a single track using imported __ function."""
     return (
@@ -601,7 +681,11 @@ def get_track_caption(metadata):
         "{artist} - {release_date}\n"
         '<a href="{album_link}">' + __("album_link") + "</a>\n"
         '<a href="{track_link}">' + __("track_link") + "</a>"
-    ).format(**metadata)
+    ).format(
+        **_html_fields(
+            metadata, "title", "artist", "release_date", "album_link", "track_link"
+        )
+    )
 
 
 def get_album_caption(metadata):
@@ -610,7 +694,7 @@ def get_album_caption(metadata):
         "<b>Album: {title}</b>\n"
         "{artist} - {release_date}\n"
         '<a href="{album_link}">' + __("album_link") + "</a>"
-    ).format(**metadata)
+    ).format(**_html_fields(metadata, "title", "artist", "release_date", "album_link"))
 
 
 def get_user_infos(event: types.Message):
@@ -636,6 +720,8 @@ async def send_track_audio(event: types.Message, metadata, dl_track_info):
     title = metadata.get("title", dl_track_info["song_name"])
     caption = get_track_caption(metadata)
     song_path = dl_track_info["song_path"]
+    if Path(song_path).stat().st_size > TELEGRAM_MAX_UPLOAD_BYTES:
+        raise ValueError(__("file_too_big"))
     duration = get_audio_duration(song_path)
     performer = ", ".join(metadata.get("artists_list", [metadata["artist"]]))
     thumb_data = make_audio_thumbnail(metadata.get("cover_data"))
@@ -688,20 +774,9 @@ async def send_album_audio(event: types.Message, metadata, dl_tracks_info):
     api_tracks_by_id = {
         str(t.get("id", "")): t for t in metadata.get("tracks_api_data", [])
     }
-    media_group = []
     processed_files = []
 
-    # Sort downloaded tracks based on track number if available
-    try:
-        dl_tracks_info.sort(
-            key=lambda t: int(t.get("TRACK_NUMBER", "999"))
-            if str(t.get("TRACK_NUMBER", "999")).isdigit()
-            else 999
-        )
-    except Exception as sort_e:
-        print(
-            f"Warning: Could not sort tracks by track number for sending. Error: {sort_e}"
-        )
+    dl_tracks_info.sort(key=track_sort_key)
 
     for dl_info in dl_tracks_info:
         song_path = dl_info["song_path"]
@@ -719,72 +794,183 @@ async def send_album_audio(event: types.Message, metadata, dl_tracks_info):
         title = api_track.get("title", dl_info["song_name"]) if api_track else dl_info["song_name"]
         performer = dl_info["artist_name"]
 
-        duration = get_audio_duration(song_path)
-        file_input = FSInputFile(song_path)  # Use FSInputFile for media group
+        if Path(song_path).stat().st_size > TELEGRAM_MAX_UPLOAD_BYTES:
+            print(f"Track {title} is too big for Telegram, skipping")
+            await event.answer(f"⚠️ {title}: {__('file_too_big')}")
+            continue
 
-        media_item = InputMediaAudio(
-            media=file_input,
-            filename=f"{clean_filename(performer)} - {clean_filename(title)}{dl_info['file_extension']}",
-            title=title,
-            performer=performer,
-            duration=duration,
-            thumbnail=BufferedInputFile(thumb_data, filename="thumb.jpg")
-            if thumb_data
-            else None,
-        )
-        media_group.append(media_item)
         processed_files.append(
             {
                 "path": song_path,
                 "title": title,
                 "performer": performer,
-                "duration": duration,
-                "extension": dl_info["file_extension"],
+                "duration": get_audio_duration(song_path),
+                "filename": f"{clean_filename(performer)} - {clean_filename(title)}{dl_info['file_extension']}",
             }
         )
 
-    # Try sending as media group (2-10 items)
-    if 2 <= len(media_group) <= 10:
+    def thumbnail():
+        return BufferedInputFile(thumb_data, filename="thumb.jpg") if thumb_data else None
+
+    async def send_individually(items):
+        for item in items:
+            try:
+                print(
+                    f"USER_DEBUG: Sending individual track {item['title']} to user_id={user_id} username={username} first_name={first_name}"
+                )
+                await event.answer_audio(
+                    FSInputFile(item["path"], filename=item["filename"]),
+                    title=item["title"],
+                    performer=item["performer"],
+                    duration=item["duration"],
+                    thumbnail=thumbnail(),
+                    disable_notification=True,
+                )
+                await asyncio.sleep(0.2)  # Small delay between messages
+            except Exception as e:
+                print(f"Error sending individual track {item['title']}: {e}")
+                await event.answer(f"⚠️ Error sending track: {item['title']}")
+
+    # Telegram media groups hold 2 to 10 items
+    for group in chunked(processed_files, TELEGRAM_MEDIA_GROUP_MAX):
+        if len(group) < 2:
+            await send_individually(group)
+            continue
+        media_group = [
+            InputMediaAudio(
+                media=FSInputFile(item["path"], filename=item["filename"]),
+                title=item["title"],
+                performer=item["performer"],
+                duration=item["duration"],
+                thumbnail=thumbnail(),
+            )
+            for item in group
+        ]
         try:
             print(
                 f"Attempting to send album {metadata['id']} as media group ({len(media_group)} items)"
             )
             await event.answer_media_group(media_group, disable_notification=True)
             print("Media group sent successfully.")
-            return  # Done if media group works
         except Exception as e:
             print(f"Failed to send as media group, sending individually: {e}")
-            # Fallback to individual sending below if media group fails
+            await send_individually(group)
 
-    # Send individually if media group failed or not applicable
-    print(
-        f"Sending album {metadata['id']} tracks individually ({len(processed_files)} items)"
-    )
-    for i, item in enumerate(processed_files):
+
+def write_zip(zip_path: Path, files_to_zip: dict) -> None:
+    with ZipFile(zip_path, "w", ZIP_DEFLATED) as zipf:
+        for src, dest in files_to_zip.items():
+            if Path(src).exists():
+                zipf.write(src, dest)
+                print(f"  Adding {src} as {dest}")
+            else:
+                print(f"  Warning: Source file not found, skipping: {src}")
+
+
+def write_zip_parts(
+    files_to_zip: dict, output_base_path: Path, max_size_bytes: int
+) -> tuple[list[Path], list[str]]:
+    """Write one zip, or several parts when the files exceed max_size_bytes.
+
+    Returns the created zips and the errors to show to the user."""
+    zip_files_created = []
+    errors = []
+    total_size = sum(Path(f).stat().st_size for f in files_to_zip if Path(f).exists())
+
+    if total_size <= max_size_bytes:
+        zip_path = Path(f"{output_base_path}.zip")
+        print(
+            f"Creating single zip: {zip_path} (Total size: {total_size / (1024 * 1024):.2f} MB)"
+        )
         try:
-            print(
-                f"USER_DEBUG: Sending individual track {i + 1}/{len(processed_files)} to user_id={user_id} username={username} first_name={first_name}"
-            )
-            # Use BufferedInputFile for individual sending to avoid potential issues with FSInputFile reuse
-            with open(item["path"], "rb") as f:
-                audio_data = f.read()
-            await event.answer_audio(
-                BufferedInputFile(
-                    audio_data,
-                    filename=f"{clean_filename(item['performer'])} - {clean_filename(item['title'])}{item['extension']}",
-                ),
-                title=item["title"],
-                performer=item["performer"],
-                duration=item["duration"],
-                thumbnail=BufferedInputFile(thumb_data, filename="thumb.jpg")
-                if thumb_data
-                else None,
-                disable_notification=True,
-            )
-            await asyncio.sleep(0.2)  # Small delay between messages
+            write_zip(zip_path, files_to_zip)
+            zip_files_created.append(zip_path)
         except Exception as e:
-            print(f"Error sending individual track {item['title']}: {e}")
-            await event.answer(f"⚠️ Error sending track: {item['title']}")
+            print(f"Error creating single zip: {e}")
+            errors.append(f"Error creating zip file: {e}")
+        return zip_files_created, errors
+
+    num_parts = math.ceil(total_size / max_size_bytes)
+    print(
+        f"Creating multi-part zip ({num_parts} parts estimate, Total size: {total_size / (1024 * 1024):.2f} MB)"
+    )
+    files_remaining = list(files_to_zip.items())
+    current_part = 1
+
+    while files_remaining:
+        zip_path = Path(f"{output_base_path}_part{current_part}.zip")
+        current_zip_size = 0
+        files_in_this_part = []
+        indices_processed_in_part = set()
+
+        try:
+            with ZipFile(zip_path, "w", ZIP_DEFLATED) as zipf:
+                for idx, (src, dest) in enumerate(files_remaining):
+                    if not Path(src).exists():
+                        print(f"  Skipping non-existent file: {src}")
+                        indices_processed_in_part.add(idx)
+                        continue
+
+                    file_size = Path(src).stat().st_size
+                    if file_size > max_size_bytes:
+                        print(
+                            f"Error: File {src} ({file_size / (1024 * 1024):.2f} MB) exceeds max part size {max_size_bytes / (1024 * 1024):.2f} MB. Skipping."
+                        )
+                        indices_processed_in_part.add(idx)
+                        continue
+
+                    # Files that do not fit are left for the next part
+                    if current_zip_size + file_size <= max_size_bytes:
+                        zipf.write(src, dest)
+                        current_zip_size += file_size
+                        files_in_this_part.append((src, dest))
+                        indices_processed_in_part.add(idx)
+
+            if files_in_this_part:
+                zip_files_created.append(zip_path)
+                print(
+                    f"  Created part {current_part}: {zip_path.name} (Size: {current_zip_size / (1024 * 1024):.2f} MB, {len(files_in_this_part)} files)"
+                )
+            else:
+                print(f"  Warning: Part {current_part} was not created (no files added).")
+                if zip_path.exists():
+                    zip_path.unlink()
+                if files_remaining and not indices_processed_in_part:
+                    print("Error: Stuck in multi-part zip creation. Aborting.")
+                    break
+
+            files_remaining = [
+                item
+                for idx, item in enumerate(files_remaining)
+                if idx not in indices_processed_in_part
+            ]
+            if not files_remaining:
+                break
+
+            current_part += 1
+            # Safety break: prevent infinite loops if something goes wrong
+            if current_part > num_parts * 1.5 + 1:
+                print(
+                    f"Error: Exceeded expected number of parts ({num_parts}). Aborting multi-part zip."
+                )
+                break
+
+        except Exception as e:
+            print(f"Error creating zip part {current_part}: {e}")
+            errors.append(f"Error creating zip part {current_part}: {e}")
+            if zip_path.exists():
+                with suppress(OSError):
+                    zip_path.unlink()
+            break
+
+    if files_remaining:
+        print(f"Warning: {len(files_remaining)} files could not be added to any zip part.")
+        for src, dest in files_remaining:
+            print(
+                f"  - Unadded: {src} (Size: {Path(src).stat().st_size if Path(src).exists() else 'N/A'})"
+            )
+
+    return zip_files_created, errors
 
 
 async def create_and_send_zip(
@@ -841,17 +1027,9 @@ async def create_and_send_zip(
     else:
         print("Cover file not available or not written, skipping inclusion in zip.")
 
-    # Sort tracks by track number before adding to zip
-    try:
-        dl_tracks_info.sort(
-            key=lambda t: int(t.get("TRACK_NUMBER", "999"))
-            if str(t.get("TRACK_NUMBER", "999")).isdigit()
-            else 999
-        )
-    except Exception as sort_e:
-        print(
-            f"Warning: Could not sort tracks by track number for zipping. Proceeding in potentially unsorted order. Error: {sort_e}"
-        )
+    dl_tracks_info.sort(key=track_sort_key)
+    # 2 discs can both have a track 1, so add the disc number to tell them apart
+    multi_disc = len({track_sort_key(t)[0] for t in dl_tracks_info}) > 1
 
     for i, track in enumerate(dl_tracks_info):
         track_num_val = track.get("TRACK_NUMBER")
@@ -862,6 +1040,8 @@ async def create_and_send_zip(
                 2
             )  # Fallback to index if track number missing/invalid
         )
+        if multi_disc:
+            track_num_str = f"{track_sort_key(track)[0]}-{track_num_str}"
         # Try to get artist/title from API metadata if available, fallback to download info
         api_track = None
         if "tracks_api_data" in metadata:
@@ -938,13 +1118,7 @@ async def create_and_send_zip(
 
         print(f"Creating zip file at: {final_zip_path}")
         try:
-            with ZipFile(final_zip_path, "w", ZIP_DEFLATED) as zipf:
-                for src, dest in files_to_zip.items():
-                    if Path(src).exists():
-                        zipf.write(src, dest)
-                        print(f"  Adding {src} as {dest}")
-                    else:
-                        print(f"  Warning: Source file not found, skipping: {src}")
+            await asyncio.to_thread(write_zip, final_zip_path, files_to_zip)
 
             file_link = FILE_LINK_TEMPLATE.format(quote(final_zip_path.name))
             print(
@@ -968,147 +1142,21 @@ async def create_and_send_zip(
         max_size_bytes = (
             48 * 1024 * 1024
         )  # Telegram's limit is 50MB, use 48MB as buffer
-        total_size = sum(
-            Path(f).stat().st_size for f in files_to_zip if Path(f).exists()
-        )
-        # Use clean names for the temporary zip file base name
-        output_base_path = Path(TMP_DIR) / clean_filename(
+        # Inside the per-download directory, so it is unique and cleaned up with it
+        output_base_path = source_dir / clean_filename(
             f"{metadata['clean_artist']} - {metadata['clean_title']} [{metadata['year']}]"
         )
-        zip_files_created = []
 
         if not files_to_zip:
             print("No valid files found to add to the zip archive.")
             await event.answer("❌ No files could be added to the zip archive.")
             return  # Exit if nothing to zip
 
-        if total_size <= max_size_bytes:
-            # --- Single Zip File ---
-            zip_path = Path(f"{output_base_path}.zip")
-            print(
-                f"Creating single zip: {zip_path} (Total size: {total_size / (1024 * 1024):.2f} MB)"
-            )
-            try:
-                with ZipFile(zip_path, "w", ZIP_DEFLATED) as zipf:
-                    for src, dest in files_to_zip.items():
-                        if Path(src).exists():
-                            zipf.write(src, dest)
-                        else:
-                            print(f"  Warning: Source file not found, skipping: {src}")
-                zip_files_created.append(zip_path)
-            except Exception as e:
-                print(f"Error creating single zip: {e}")
-                await event.answer(f"❌ Error creating zip file: {e}")
-
-        else:
-            # --- Multi-part Zip ---
-            num_parts = math.ceil(total_size / max_size_bytes)
-            print(
-                f"Creating multi-part zip ({num_parts} parts estimate, Total size: {total_size / (1024 * 1024):.2f} MB)"
-            )
-            # Use the sorted list of (src, dest) items from files_to_zip dictionary
-            files_remaining = list(files_to_zip.items())
-            current_part = 1
-
-            while files_remaining:
-                zip_path = Path(f"{output_base_path}_part{current_part}.zip")
-                current_zip_size = 0
-                files_in_this_part = []
-                indices_processed_in_part = set()  # Track indices added to this part
-
-                try:
-                    with ZipFile(zip_path, "w", ZIP_DEFLATED) as zipf:
-                        # Iterate through remaining files to fill the current part
-                        for idx, (src, dest) in enumerate(files_remaining):
-                            if not Path(src).exists():
-                                print(f"  Skipping non-existent file: {src}")
-                                indices_processed_in_part.add(
-                                    idx
-                                )  # Mark as processed (skipped)
-                                continue
-
-                            file_size = Path(src).stat().st_size
-                            # Check if file itself is too large (should ideally not happen with audio)
-                            if file_size > max_size_bytes:
-                                print(
-                                    f"Error: File {src} ({file_size / (1024 * 1024):.2f} MB) exceeds max part size {max_size_bytes / (1024 * 1024):.2f} MB. Skipping."
-                                )
-                                indices_processed_in_part.add(
-                                    idx
-                                )  # Mark as processed (skipped)
-                                continue
-
-                            # Check if adding this file exceeds the limit for *this* part
-                            if current_zip_size + file_size <= max_size_bytes:
-                                zipf.write(src, dest)
-                                current_zip_size += file_size
-                                files_in_this_part.append((src, dest))
-                                indices_processed_in_part.add(
-                                    idx
-                                )  # Mark as added to this part
-                            else:
-                                # Cannot add this file to the current part, leave for the next
-                                continue
-
-                    # After iterating through all remaining files for the current part:
-                    if files_in_this_part:  # Only save the zip if files were added
-                        zip_files_created.append(zip_path)
-                        print(
-                            f"  Created part {current_part}: {zip_path.name} (Size: {current_zip_size / (1024 * 1024):.2f} MB, {len(files_in_this_part)} files)"
-                        )
-                    else:
-                        # If no files could be added (e.g., next file is too large), delete empty zip
-                        print(
-                            f"  Warning: Part {current_part} was not created (no files added)."
-                        )
-                        if zip_path.exists():
-                            zip_path.unlink()
-                        # Safety break: if no files were added and there are still files remaining, something is wrong
-                        if files_remaining and not indices_processed_in_part:
-                            print("Error: Stuck in multi-part zip creation. Aborting.")
-                            break
-
-                    # Remove the processed files from files_remaining *after* the loop
-                    # Iterate backwards to avoid index issues
-                    new_files_remaining = []
-                    for idx, item in enumerate(files_remaining):
-                        if idx not in indices_processed_in_part:
-                            new_files_remaining.append(item)
-                    files_remaining = new_files_remaining
-
-                    if not files_remaining:
-                        break  # All files processed
-
-                    current_part += 1
-                    # Safety break: prevent infinite loops if something goes wrong
-                    if current_part > num_parts * 1.5 + 1:  # Allow some leeway
-                        print(
-                            f"Error: Exceeded expected number of parts ({num_parts}). Aborting multi-part zip."
-                        )
-                        break
-
-                except Exception as e:
-                    print(f"Error creating zip part {current_part}: {e}")
-                    await event.answer(
-                        f"❌ Error creating zip part {current_part}: {e}"
-                    )
-                    if zip_path.exists():
-                        try:
-                            zip_path.unlink()
-                        except OSError:
-                            pass
-                    # Stop creating further parts if one fails critically
-                    break
-
-            # After loop, check if any files were left unprocessed
-            if files_remaining:
-                print(
-                    f"Warning: {len(files_remaining)} files could not be added to any zip part."
-                )
-                for src, dest in files_remaining:
-                    print(
-                        f"  - Unadded: {src} (Size: {Path(src).stat().st_size if Path(src).exists() else 'N/A'})"
-                    )
+        zip_files_created, zip_errors = await asyncio.to_thread(
+            write_zip_parts, files_to_zip, output_base_path, max_size_bytes
+        )
+        for zip_error in zip_errors:
+            await event.answer(f"❌ {zip_error}")
 
         # --- Send Created Zip Files ---
         if zip_files_created:
@@ -1139,16 +1187,6 @@ async def create_and_send_zip(
             # Avoid sending error if copy mode was used (link was sent instead)
             if not (COPY_FILES_PATH and FILE_LINK_TEMPLATE):
                 await event.answer("❌ Failed to create any zip files.")
-
-        # --- Cleanup Temporary Zip Files ---
-        print("Cleaning up temporary zip files...")
-        for zip_file in zip_files_created:
-            if zip_file.exists():
-                try:
-                    zip_file.unlink()
-                    print(f"  Removed {zip_file.name}")
-                except OSError as e:
-                    print(f"  Error removing {zip_file.name}: {e}")
 
 
 # --- Message Handlers ---
@@ -1182,11 +1220,11 @@ async def handle_track_link(event: types.Message, real_link=None):
         return
 
     add_downloading(user_id)
-    tmp_msg = await event.answer(__("downloading"))
-
+    tmp_msg = None
     download_dir_to_clean = None  # Store the path to clean up
 
     try:
+        tmp_msg = await event.answer(__("downloading"))
         # Download the track
         dl_track_info = await download_track(track_id)
         if not dl_track_info or "song_path" not in dl_track_info:
@@ -1197,7 +1235,7 @@ async def handle_track_link(event: types.Message, real_link=None):
             download_dir_to_clean = Path(dl_track_info["download_dir"])
 
         # Fetch metadata (can happen after download)
-        metadata = get_track_metadata_from_api(track_id)
+        metadata = await asyncio.to_thread(get_track_metadata_from_api, track_id)
 
         # Send based on format preference
         if os.environ.get("FORMAT") == "zip":
@@ -1222,9 +1260,10 @@ async def handle_track_link(event: types.Message, real_link=None):
         )
         print(f"Error processing track {track_id}: {e}")
         print(traceback.format_exc())
-        await tmp_msg.delete()
-        error_message = str(e) if str(e) else "An unknown error occurred."
-        await event.answer(f"{__('download_error')} {error_message}")
+        if tmp_msg:
+            with suppress(Exception):
+                await tmp_msg.delete()
+        await event.answer(f"{__('download_error')} {user_error_message(e)}")
     finally:
         remove_downloading(user_id)
         # Cleanup the download directory if it was set
@@ -1266,28 +1305,21 @@ async def handle_album_link(event: types.Message, real_link=None):
         return
 
     add_downloading(user_id)
-    tmp_msg = await event.answer(__("downloading"))
+    tmp_msg = None
     download_dir_to_clean = None  # Store the path to clean up
 
     try:
+        tmp_msg = await event.answer(__("downloading"))
         # Download the album tracks (with internal retries per track)
         dl_tracks_info = await download_album(album_id)
         if not dl_tracks_info:  # Check if *any* tracks were successfully downloaded
             raise ValueError("Album download failed or returned no successful tracks.")
 
-        # Determine the download directory from the first successful track for cleanup
-        # All successful tracks should share the same base directory
-        if dl_tracks_info and "download_dir" in dl_tracks_info[0]:
-            download_dir_to_clean = Path(dl_tracks_info[0]["download_dir"])
-        else:
-            print(
-                "Warning: Could not determine download directory for cleanup from track info."
-            )
-            # Attempt to construct the expected path as a fallback
-            download_dir_to_clean = Path(TMP_DIR) / "deezer" / "album" / str(album_id)
+        # All successful tracks share the same base directory
+        download_dir_to_clean = Path(dl_tracks_info[0]["download_dir"])
 
         # Fetch album metadata (can happen after download)
-        metadata = get_album_metadata_from_api(album_id)
+        metadata = await asyncio.to_thread(get_album_metadata_from_api, album_id)
 
         # Send based on format preference
         if os.environ.get("FORMAT") == "zip":
@@ -1312,12 +1344,13 @@ async def handle_album_link(event: types.Message, real_link=None):
         )
         print(f"Error processing album {album_id}: {e}")
         print(traceback.format_exc())
-        await tmp_msg.delete()
-        error_message = str(e) if str(e) else "An unknown error occurred."
-        await event.answer(f"{__('download_error')} {error_message}")
+        if tmp_msg:
+            with suppress(Exception):
+                await tmp_msg.delete()
+        await event.answer(f"{__('download_error')} {user_error_message(e)}")
     finally:
         remove_downloading(user_id)
-        # Cleanup the download directory if it was set or constructed
+        # Cleanup the download directory if it was set
         if download_dir_to_clean and download_dir_to_clean.exists():
             try:
                 print(f"Cleaning up download directory: {download_dir_to_clean}")
@@ -1340,13 +1373,13 @@ async def handle_shortlink(event: types.Message):
         f"USER_DEBUG: Shortlink request from user_id={user_id} username={username} first_name={first_name}"
     )
     print(f"User {user_id}: Received shortlink: {event.text}")
-    tmp_msg = await event.answer("🔗 Resolving shortlink...")
-    ssl_context = ssl.create_default_context(cafile=certifi.where())  # Use certifi CAs
-    connector = aiohttp.TCPConnector(ssl=ssl_context)
-
     if not event.text:
         await event.answer("Invalid shortlink format.")
         return
+
+    tmp_msg = await event.answer("🔗 Resolving shortlink...")
+    ssl_context = ssl.create_default_context(cafile=certifi.where())  # Use certifi CAs
+    connector = aiohttp.TCPConnector(ssl=ssl_context)
 
     try:
         async with aiohttp.ClientSession(connector=connector) as session:
@@ -1506,6 +1539,16 @@ async def inline_search_handler(inline_query: InlineQuery):
                     f"Error processing individual search result item {item_data.get('id', 'N/A')}: {item_e}"
                 )
 
+    except DeezerArlExpiredException as e:
+        print(f"Deezer search failed, ARL expired: {e}")
+        await bot.answer_inline_query(
+            inline_query.id,
+            results=[],
+            cache_time=10,
+            switch_pm_text=__("arl_expired"),
+            switch_pm_parameter="arl_expired",
+        )
+        return
     # Handle potential DeezerApiException from deezer_search
     except DeezerApiException as e:
         print(f"Deezer API exception during search: {e}")
