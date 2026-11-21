@@ -12,6 +12,8 @@ from binascii import a2b_hex, b2a_hex
 from typing import Any
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util import Retry
 from Crypto.Cipher import Blowfish
 from Crypto.Hash import MD5
 from mutagen import MutagenError
@@ -42,6 +44,17 @@ def require_session() -> requests.Session:
     if arl_expired:
         raise DeezerArlExpiredException("Error: Deezer ARL token expired, update DEEZER_TOKEN")
     raise DeezerApiException("Error: Deezer session not initialized")
+
+
+def new_http_session() -> requests.Session:
+    # Deezer closes idle keep-alive sockets, so the first request after a pause can get a reset.
+    # Retry once, with no wait, on network errors only. Retrying POST is safe: get_url only reads.
+    retry = Retry(total=1, allowed_methods={"GET", "POST"}, respect_retry_after_header=False)
+    adapter = HTTPAdapter(max_retries=retry)
+    sess = requests.Session()
+    sess.mount("https://", adapter)
+    sess.mount("http://", adapter)
+    return sess
 
 
 def get_user_data(sess: requests.Session | None = None) -> tuple[Any, Any] | None:
@@ -129,7 +142,7 @@ def init_deezer_session(proxy_server: str, quality: str) -> None:
         "DNT": "1",
     }
     # Build the new session fully before publishing it: download threads read the globals
-    new_session = requests.session()
+    new_session = new_http_session()
     new_session.headers.update(header)
     new_session.cookies.update({"arl": deezer_token, "comeback": "1"})
     if len(proxy_server.strip()) > 0:
@@ -337,24 +350,25 @@ def get_picture_link(pic_idid):
 
 def get_song_url(track_token: str, format: str) -> str:
     try:
-        response = requests.post(
-            "https://media.deezer.com/v1/get_url",
-            json={
-                "license_token": license_token,
-                "media": [
-                    {
-                        "type": "FULL",
-                        "formats": [{"cipher": "BF_CBC_STRIPE", "format": format}],
-                    }
-                ],
-                "track_tokens": [
-                    track_token,
-                ],
-            },
-            headers={"User-Agent": USER_AGENT},
-            proxies=require_session().proxies,
-            timeout=HTTP_TIMEOUT,
-        )
+        with new_http_session() as media_session:
+            response = media_session.post(
+                "https://media.deezer.com/v1/get_url",
+                json={
+                    "license_token": license_token,
+                    "media": [
+                        {
+                            "type": "FULL",
+                            "formats": [{"cipher": "BF_CBC_STRIPE", "format": format}],
+                        }
+                    ],
+                    "track_tokens": [
+                        track_token,
+                    ],
+                },
+                headers={"User-Agent": USER_AGENT},
+                proxies=require_session().proxies,
+                timeout=HTTP_TIMEOUT,
+            )
         response.raise_for_status()
         data = response.json()
     except requests.exceptions.HTTPError as e:
