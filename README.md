@@ -4,7 +4,7 @@
   <br>
 </h1>
 
-<h4 align="center">A Telegram bot to download music from Deezer, YouTube and SoundCloud</h4>
+<h4 align="center">A Telegram bot and Mini App to search and download music from Deezer, YouTube and SoundCloud</h4>
 
 > [!WARNING]
 > For educational purposes only. Downloading from Deezer is against **Deezer's terms of service**.
@@ -80,6 +80,8 @@ Search in any chat with inline mode. `track` is the default:
 ```
 
 Pick a result, then press **Download**. You can also send a Deezer, YouTube or SoundCloud link to the bot directly.
+
+If you set up the [Mini App](#mini-app), tap the menu button next to the message field to search, preview and download from a full page.
 
 ## Mini App
 
