@@ -16,7 +16,7 @@
 - Send a Deezer, YouTube or SoundCloud link to the bot to get the audio file.
 - Files come with tags and album art. FLAC is available with Deezer Premium.
 
-<p align="center">
+<p>
   <img src="https://user-images.githubusercontent.com/24623168/141982877-ca7589d4-fe47-4b5a-b751-6d945c21f944.png" height="360" alt="Inline search results">
   &nbsp;
   <img src="https://user-images.githubusercontent.com/24623168/141983477-b7692d78-134a-4176-98ba-d6388ac4b80b.png" height="360" alt="A downloaded track in Telegram">
