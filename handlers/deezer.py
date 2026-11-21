@@ -192,10 +192,6 @@ def track_sort_key(track: dict) -> tuple[int, int]:
     return as_int(track.get("DISK_NUMBER"), 1), as_int(track.get("TRACK_NUMBER"), 999)
 
 
-def chunked(items: list, size: int) -> list[list]:
-    return [items[i : i + size] for i in range(0, len(items), size)]
-
-
 def make_download_dir(kind: str, item_id) -> Path:
     # One directory per download, so 2 users fetching the same item do not share files
     parent = Path(TMP_DIR) / "deezer" / kind
@@ -831,30 +827,30 @@ async def send_album_audio(event: types.Message, metadata, dl_tracks_info):
                 print(f"Error sending individual track {item['title']}: {e}")
                 await event.answer(f"⚠️ Error sending track: {item['title']}")
 
-    # Telegram media groups hold 2 to 10 items
-    for group in chunked(processed_files, TELEGRAM_MEDIA_GROUP_MAX):
-        if len(group) < 2:
-            await send_individually(group)
-            continue
-        media_group = [
-            InputMediaAudio(
-                media=FSInputFile(item["path"], filename=item["filename"]),
-                title=item["title"],
-                performer=item["performer"],
-                duration=item["duration"],
-                thumbnail=thumbnail(),
-            )
-            for item in group
-        ]
-        try:
-            print(
-                f"Attempting to send album {metadata['id']} as media group ({len(media_group)} items)"
-            )
-            await event.answer_media_group(media_group, disable_notification=True)
-            print("Media group sent successfully.")
-        except Exception as e:
-            print(f"Failed to send as media group, sending individually: {e}")
-            await send_individually(group)
+    # Telegram media groups hold 2 to 10 items. A bigger album goes one track
+    # per message: several blocks split the album in an ugly way.
+    if not 2 <= len(processed_files) <= TELEGRAM_MEDIA_GROUP_MAX:
+        await send_individually(processed_files)
+        return
+    media_group = [
+        InputMediaAudio(
+            media=FSInputFile(item["path"], filename=item["filename"]),
+            title=item["title"],
+            performer=item["performer"],
+            duration=item["duration"],
+            thumbnail=thumbnail(),
+        )
+        for item in processed_files
+    ]
+    try:
+        print(
+            f"Attempting to send album {metadata['id']} as media group ({len(media_group)} items)"
+        )
+        await event.answer_media_group(media_group, disable_notification=True)
+        print("Media group sent successfully.")
+    except Exception as e:
+        print(f"Failed to send as media group, sending individually: {e}")
+        await send_individually(processed_files)
 
 
 def write_zip(zip_path: Path, files_to_zip: dict) -> None:

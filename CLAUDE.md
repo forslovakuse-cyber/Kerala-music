@@ -60,7 +60,7 @@ No test suite exists.
 - Every HTTP request uses `HTTP_TIMEOUT` from `utils.py` (connect 10 s, read 60 s per read, so long streams still work).
 - Each download gets its own temp directory (`tempfile.mkdtemp` under `tmp/deezer/`), so 2 users can download the same item at once.
 - Without `FORMAT=zip`, a FLAC track too big for Telegram's 50 MB upload limit is downloaded as MP3 instead. YouTube videos over 20 minutes are refused before download for the same reason.
-- Albums are sent as media groups of up to 10 tracks, sorted by disc then track number.
+- An album of 2 to 10 tracks is sent as one media group (Telegram allows 10 at most). A bigger album is sent one track per message. Tracks are sorted by disc then track number.
 - Output format is controlled by `FORMAT=zip` env var; when set, tracks are bundled in zip archives (auto-split at 48MB for Telegram's limit).
 
 ## Environment Variables
