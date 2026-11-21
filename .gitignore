@@ -29,3 +29,6 @@ local_resources/*
 
 # Secrets
 token.env
+
+# Netlify
+.netlify/

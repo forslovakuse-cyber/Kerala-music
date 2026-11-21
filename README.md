@@ -12,6 +12,7 @@
 ## What it does
 
 - Search Deezer from any chat with inline mode, then download a track or a whole album.
+- Search, preview and browse albums in an optional [Mini App](#mini-app) opened from the bot.
 - Send a Deezer, YouTube or SoundCloud link to the bot to get the audio file.
 - Files come with tags and album art. FLAC is available with Deezer Premium.
 
@@ -79,6 +80,39 @@ Search in any chat with inline mode. `track` is the default:
 ```
 
 Pick a result, then press **Download**. You can also send a Deezer, YouTube or SoundCloud link to the bot directly.
+
+## Mini App
+
+The Mini App is a search page that opens inside Telegram, from the button next to the message field or the **Open** button in the chat list. It lets you:
+
+- search tracks and albums as you type, or browse the Deezer charts
+- open an album to see its track list
+- play a 30-second preview
+- download a track or an album with one tap
+
+It is optional. The bot works the same without it.
+
+The page is one static file, `webapp/index.html`. It talks to the public Deezer API from the browser and needs no server of its own. A download opens a `/start` link to your bot, which sends the file to the chat as usual. The text follows each user's Telegram language.
+
+### Set up the Mini App
+
+1. Host the `webapp` folder on any static host with HTTPS, such as [Netlify](https://www.netlify.com/) or [Cloudflare Pages](https://pages.cloudflare.com/). With the Netlify CLI:
+
+   ```bash
+   npx netlify-cli deploy --dir webapp --prod
+   ```
+
+2. In [BotFather](https://t.me/botfather), open your bot, then **Bot Settings → Configure Mini App**:
+   - **Main App**: turn it on and set the URL to `https://<your-site>/<your_bot_username>`, without the `@`. Choose the **Fullsize** launch mode.
+   - **Menu Button**: set the same URL, with a short title such as `Search`.
+
+The page reads your bot username from the URL, so you can host it publicly without naming your bot in the code. The URL must be 64 characters or fewer, so pick a short site name.
+
+`webapp/_redirects` sends every path to `index.html`. Netlify and Cloudflare Pages read this file. On another host, either set up the same rewrite or use `https://<your-site>/?bot=<your_bot_username>`.
+
+`webapp/_headers` asks search engines not to index the page.
+
+To force a language, add `?lang=fr` (or `en`, `de`, `es`, `pt`, `in`, `zh`, `ar`) to the URL.
 
 ## Configuration
 

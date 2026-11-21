@@ -1,0 +1,947 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+<title>Music search</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root {
+    --fb-bg: #ffffff;
+    --fb-secondary: #efeff4;
+    --fb-text: #000000;
+    --fb-hint: #8e8e93;
+    --fb-accent: #2481cc;
+
+    --page: var(--tg-theme-secondary-bg-color, var(--fb-secondary));
+    --section: var(--tg-theme-section-bg-color, var(--tg-theme-bg-color, var(--fb-bg)));
+    --text: var(--tg-theme-text-color, var(--fb-text));
+    --hint: var(--tg-theme-hint-color, var(--fb-hint));
+    --subtitle: var(--tg-theme-subtitle-text-color, var(--hint));
+    --accent: var(--tg-theme-accent-text-color, var(--tg-theme-link-color, var(--fb-accent)));
+    --button: var(--tg-theme-button-color, var(--fb-accent));
+    --button-text: var(--tg-theme-button-text-color, #ffffff);
+    --header-text: var(--tg-theme-section-header-text-color, var(--accent));
+    --destructive: var(--tg-theme-destructive-text-color, #e53935);
+    --separator: var(--tg-theme-section-separator-color, color-mix(in srgb, var(--hint) 22%, transparent));
+    --fill: color-mix(in srgb, var(--hint) 14%, transparent);
+
+    --safe-top: calc(var(--tg-safe-area-inset-top, 0px) + var(--tg-content-safe-area-inset-top, 0px));
+    --safe-bottom: calc(var(--tg-safe-area-inset-bottom, 0px) + var(--tg-content-safe-area-inset-bottom, 0px));
+    --safe-left: calc(var(--tg-safe-area-inset-left, 0px) + var(--tg-content-safe-area-inset-left, 0px));
+    --safe-right: calc(var(--tg-safe-area-inset-right, 0px) + var(--tg-content-safe-area-inset-right, 0px));
+    color-scheme: light dark;
+  }
+  /* Only used when the page runs outside Telegram, which sets the --tg-theme-* vars. */
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --fb-bg: #1c1c1e;
+      --fb-secondary: #000000;
+      --fb-text: #ffffff;
+      --fb-hint: #8d8d93;
+      --fb-accent: #3e9bf0;
+    }
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body { overflow-x: clip; }
+  body {
+    margin: 0;
+    padding: 0 var(--safe-right) calc(var(--safe-bottom) + 24px) var(--safe-left);
+    background: var(--page);
+    color: var(--text);
+    font: 15px/1.35 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Roboto", "Segoe UI", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  button { font: inherit; color: inherit; border: 0; background: none; padding: 0; cursor: pointer; }
+  svg { display: block; }
+  [hidden] { display: none !important; }
+
+  .top {
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    padding: calc(var(--safe-top) + 10px) 12px 10px;
+    background: color-mix(in srgb, var(--page) 88%, transparent);
+    -webkit-backdrop-filter: saturate(1.6) blur(14px);
+    backdrop-filter: saturate(1.6) blur(14px);
+  }
+  .field { position: relative; }
+  .field > svg {
+    position: absolute;
+    inset-inline-start: 11px;
+    top: 50%;
+    width: 18px;
+    height: 18px;
+    transform: translateY(-50%);
+    color: var(--hint);
+    pointer-events: none;
+  }
+  input[type=search] {
+    width: 100%;
+    height: 40px;
+    padding: 0 10px;
+    padding-inline-start: 36px;
+    border: 0;
+    border-radius: 11px;
+    background: var(--section);
+    color: var(--text);
+    font: inherit;
+    font-size: 16px;
+    outline: none;
+    -webkit-appearance: none;
+    appearance: none;
+  }
+  input[type=search]::placeholder { color: var(--hint); }
+  /* The native clear button is dark grey, so it vanishes on dark themes. */
+  input[type=search]::-webkit-search-cancel-button {
+    -webkit-appearance: none;
+    width: 18px;
+    height: 18px;
+    cursor: pointer;
+    background: var(--hint);
+    -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm4.3 12.9-1.4 1.4L12 13.4l-2.9 2.9-1.4-1.4 2.9-2.9-2.9-2.9 1.4-1.4 2.9 2.9 2.9-2.9 1.4 1.4-2.9 2.9z'/%3E%3C/svg%3E") center / contain no-repeat;
+  }
+  .busy-dot {
+    position: absolute;
+    inset-inline-end: 38px;
+    top: 50%;
+    width: 16px;
+    height: 16px;
+    margin-top: -8px;
+    border: 2px solid var(--fill);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin .7s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .seg {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 2px;
+    margin-top: 10px;
+    padding: 2px;
+    border-radius: 10px;
+    background: var(--fill);
+  }
+  .seg button {
+    height: 32px;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--subtitle);
+    transition: background .15s, color .15s;
+  }
+  .seg button[aria-selected=true] {
+    background: var(--section);
+    color: var(--text);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, .12);
+  }
+
+  .notice {
+    margin: 4px 12px 8px;
+    padding: 10px 12px;
+    border-radius: 11px;
+    background: color-mix(in srgb, var(--destructive) 12%, var(--section));
+    color: var(--destructive);
+    font-size: 14px;
+  }
+  .heading {
+    margin: 14px 28px 6px;
+    color: var(--header-text);
+    font-size: 13px;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: .02em;
+  }
+  .heading:empty { display: none; }
+  .list {
+    list-style: none;
+    margin: 0 12px;
+    padding: 0;
+    border-radius: 12px;
+    background: var(--section);
+    overflow: hidden;
+    transition: opacity .2s;
+  }
+  .list:empty { display: none; }
+  .list.stale { opacity: .55; }
+
+  .row {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-height: 64px;
+    padding: 6px 8px;
+    padding-inline-start: 12px;
+  }
+  .row + .row::before, .disc + .row::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    inset-inline-start: 76px;
+    inset-inline-end: 0;
+    border-top: .5px solid var(--separator);
+  }
+  .in-album .row + .row::before { inset-inline-start: 56px; }
+  .row-main {
+    display: flex;
+    flex: 1;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
+    min-height: 52px;
+    text-align: start;
+  }
+  .art {
+    position: relative;
+    flex: none;
+    width: 52px;
+    height: 52px;
+    border-radius: 8px;
+    overflow: hidden;
+    background: var(--fill);
+  }
+  .art img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .art .ico {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    background: rgba(0, 0, 0, .28);
+    color: #fff;
+    transition: background .15s;
+  }
+  .art .ico svg { width: 20px; height: 20px; filter: drop-shadow(0 1px 2px rgba(0, 0, 0, .4)); }
+  .playing .art .ico { background: rgba(0, 0, 0, .5); }
+  .num {
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 32px;
+    height: 44px;
+    color: var(--hint);
+    font-size: 15px;
+    font-variant-numeric: tabular-nums;
+  }
+  .num svg { width: 18px; height: 18px; color: var(--accent); }
+  .num .ico { display: none; }
+  .playing .num .ico { display: block; }
+  .playing .num .n { display: none; }
+
+  .meta { flex: 1; min-width: 0; }
+  .title, .sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .title { font-size: 16px; font-weight: 500; }
+  .playing .title { color: var(--accent); }
+  .sub { margin-top: 2px; color: var(--subtitle); font-size: 14px; }
+  [dir=rtl] .title, [dir=rtl] .sub { text-align: right; }
+  .album-link { color: var(--accent); cursor: pointer; }
+  .badge {
+    display: inline-grid;
+    place-items: center;
+    width: 15px;
+    height: 15px;
+    margin-inline-end: 5px;
+    border-radius: 3px;
+    background: var(--hint);
+    color: var(--section);
+    font-size: 10px;
+    font-weight: 700;
+    vertical-align: 2px;
+    line-height: 1;
+  }
+  .dur { flex: none; color: var(--hint); font-size: 13px; font-variant-numeric: tabular-nums; }
+  .chev { flex: none; width: 16px; height: 16px; color: var(--hint); opacity: .6; }
+  [dir=rtl] .chev, [dir=rtl] .back svg { transform: scaleX(-1); }
+
+  .dl {
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    background: color-mix(in srgb, var(--button) 14%, transparent);
+    color: var(--button);
+    transition: background .2s, color .2s, transform .1s;
+  }
+  .dl:active { transform: scale(.9); }
+  .dl svg { width: 20px; height: 20px; }
+  .dl.done { background: var(--button); color: var(--button-text); }
+
+  .progress {
+    position: absolute;
+    inset-inline: 0;
+    bottom: 0;
+    height: 2px;
+    background: var(--accent);
+    transform: scaleX(var(--p, 0));
+    transform-origin: left;
+    transition: transform .25s linear;
+    pointer-events: none;
+  }
+  [dir=rtl] .progress { transform-origin: right; }
+  .row:not(.playing) .progress { display: none; }
+
+  .state {
+    margin: 48px 32px;
+    text-align: center;
+    color: var(--hint);
+  }
+  .state svg { width: 44px; height: 44px; margin: 0 auto 12px; opacity: .7; }
+  .state strong { display: block; margin-bottom: 4px; color: var(--text); font-size: 17px; font-weight: 600; }
+  .state p { margin: 0; font-size: 14px; overflow-wrap: anywhere; }
+  .state button {
+    margin-top: 16px;
+    padding: 10px 20px;
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--button) 14%, transparent);
+    color: var(--button);
+    font-weight: 600;
+  }
+
+  .skel .art, .skel .line {
+    background: var(--fill);
+    animation: pulse 1.2s ease-in-out infinite;
+  }
+  .skel .line { height: 12px; border-radius: 6px; }
+  .skel .line + .line { margin-top: 8px; width: 55%; }
+  @keyframes pulse { 50% { opacity: .45; } }
+
+  .back {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    margin: calc(var(--safe-top) + 8px) 8px 0;
+    padding: 8px;
+    color: var(--accent);
+    font-size: 16px;
+  }
+  .back svg { width: 22px; height: 22px; }
+  .hero {
+    padding: calc(var(--safe-top) + 20px) 20px 8px;
+    text-align: center;
+  }
+  .back:not([hidden]) + .hero { padding-top: 4px; }
+  .hero .cover {
+    width: min(60vw, 240px);
+    aspect-ratio: 1;
+    margin: 0 auto 16px;
+    border-radius: 14px;
+    overflow: hidden;
+    background: var(--fill);
+    box-shadow: 0 10px 30px rgba(0, 0, 0, .25);
+  }
+  .hero .cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .hero h1 { margin: 0; font-size: 22px; line-height: 1.25; font-weight: 700; overflow-wrap: anywhere; }
+  .hero .artist { margin-top: 4px; color: var(--accent); font-size: 17px; }
+  .hero .facts { margin-top: 6px; min-height: 18px; color: var(--hint); font-size: 14px; }
+  .primary {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    width: 100%;
+    max-width: 420px;
+    height: 48px;
+    margin: 18px auto 0;
+    border-radius: 12px;
+    background: var(--button);
+    color: var(--button-text);
+    font-size: 16px;
+    font-weight: 600;
+    transition: opacity .2s, transform .1s;
+  }
+  .primary:active { transform: scale(.98); }
+  .primary svg { width: 20px; height: 20px; }
+  .primary.done { opacity: .75; }
+  .disc {
+    padding: 12px 16px 4px;
+    color: var(--header-text);
+    font-size: 13px;
+    font-weight: 500;
+    text-transform: uppercase;
+  }
+  #album-view .list { margin-top: 16px; }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; }
+  }
+</style>
+</head>
+<body>
+<div id="search-view">
+  <header class="top">
+    <form id="search-form" class="field" role="search">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.2-4.2"/></svg>
+      <input type="search" id="q" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="search">
+      <span class="busy-dot" id="busy" hidden></span>
+    </form>
+    <div class="seg" role="tablist">
+      <button type="button" role="tab" data-type="track" aria-selected="true" data-i18n="tabTracks"></button>
+      <button type="button" role="tab" data-type="album" aria-selected="false" data-i18n="tabAlbums"></button>
+    </div>
+  </header>
+  <div class="notice" id="notice" hidden></div>
+  <div class="heading" id="heading"></div>
+  <ul class="list" id="results"></ul>
+  <div class="state" id="state" hidden></div>
+</div>
+
+<div id="album-view" hidden>
+  <button type="button" class="back" id="album-back" hidden></button>
+  <div class="hero">
+    <div class="cover"><img id="album-cover" alt=""></div>
+    <h1 id="album-title"></h1>
+    <div class="artist" id="album-artist"></div>
+    <div class="facts" id="album-facts"></div>
+    <button type="button" class="primary" id="album-dl"></button>
+  </div>
+  <ul class="list in-album" id="album-tracks"></ul>
+  <div class="state" id="album-state" hidden></div>
+</div>
+
+<audio id="player" preload="none"></audio>
+
+<script>
+  const tg = window.Telegram?.WebApp;
+  const supports = (v) => !!tg?.isVersionAtLeast?.(v);
+  tg?.ready();
+  tg?.expand();
+  if (supports("6.1")) {
+    tg.setHeaderColor("secondary_bg_color");
+    tg.setBackgroundColor("secondary_bg_color");
+  }
+  // Native controls must follow the Telegram theme, not the OS one. Outside Telegram the platform is "unknown".
+  const applyScheme = () => {
+    if (tg && tg.platform !== "unknown") document.documentElement.style.colorScheme = tg.colorScheme;
+  };
+  applyScheme();
+  tg?.onEvent("themeChanged", applyScheme);
+
+  const STRINGS = {
+    en: {
+      search: "Search Deezer", tabTracks: "Tracks", tabAlbums: "Albums",
+      topTracks: "Top tracks on Deezer", topAlbums: "Top albums on Deezer",
+      noResults: "No results", noResultsText: "Nothing found for “{q}”. Check the spelling or try other words.",
+      errorTitle: "Could not load results", errorText: "Check your connection and try again.", retry: "Try again",
+      missingBot: "Missing ?bot= in the URL: downloads will not work.",
+      download: "Download", downloadAlbum: "Download album", sent: "Sent to the chat",
+      tracks: { one: "{n} track", other: "{n} tracks" }, disc: "Disc {n}",
+      single: "Single", ep: "EP", compile: "Compilation",
+      play: "Play preview", pause: "Pause preview", back: "Back", explicit: "Explicit", openAlbum: "Open album",
+      min: "{m} min", hmin: "{h} h {m} min",
+    },
+    fr: {
+      search: "Rechercher sur Deezer", tabTracks: "Titres", tabAlbums: "Albums",
+      topTracks: "Les titres du moment", topAlbums: "Les albums du moment",
+      noResults: "Aucun résultat", noResultsText: "Rien trouvé pour « {q} ». Vérifiez l’orthographe ou essayez d’autres mots.",
+      errorTitle: "Impossible de charger les résultats", errorText: "Vérifiez votre connexion, puis réessayez.", retry: "Réessayer",
+      missingBot: "Il manque ?bot= dans l’adresse : les téléchargements ne marcheront pas.",
+      download: "Télécharger", downloadAlbum: "Télécharger l’album", sent: "Envoyé dans la discussion",
+      tracks: { one: "{n} titre", other: "{n} titres" }, disc: "Disque {n}",
+      single: "Single", ep: "EP", compile: "Compilation",
+      play: "Écouter un extrait", pause: "Mettre en pause", back: "Retour", explicit: "Paroles explicites", openAlbum: "Voir l’album",
+      min: "{m} min", hmin: "{h} h {m} min",
+    },
+    es: {
+      search: "Buscar en Deezer", tabTracks: "Canciones", tabAlbums: "Álbumes",
+      topTracks: "Lo más escuchado en Deezer", topAlbums: "Álbumes más escuchados en Deezer",
+      noResults: "Sin resultados", noResultsText: "No hay nada para «{q}». Revisa la ortografía o prueba con otras palabras.",
+      errorTitle: "No se pudieron cargar los resultados", errorText: "Comprueba tu conexión e inténtalo de nuevo.", retry: "Reintentar",
+      missingBot: "Falta ?bot= en la URL: las descargas no funcionarán.",
+      download: "Descargar", downloadAlbum: "Descargar álbum", sent: "Enviado al chat",
+      tracks: { one: "{n} canción", other: "{n} canciones" }, disc: "Disco {n}",
+      single: "Sencillo", ep: "EP", compile: "Recopilatorio",
+      play: "Escuchar fragmento", pause: "Pausar", back: "Atrás", explicit: "Explícito", openAlbum: "Abrir álbum",
+      min: "{m} min", hmin: "{h} h {m} min",
+    },
+    pt: {
+      search: "Pesquisar no Deezer", tabTracks: "Músicas", tabAlbums: "Álbuns",
+      topTracks: "Músicas em alta no Deezer", topAlbums: "Álbuns em alta no Deezer",
+      noResults: "Nenhum resultado", noResultsText: "Nada encontrado para “{q}”. Verifique a ortografia ou tente outras palavras.",
+      errorTitle: "Não foi possível carregar os resultados", errorText: "Verifique sua conexão e tente novamente.", retry: "Tentar novamente",
+      missingBot: "Falta ?bot= na URL: os downloads não vão funcionar.",
+      download: "Baixar", downloadAlbum: "Baixar álbum", sent: "Enviado para o chat",
+      tracks: { one: "{n} música", other: "{n} músicas" }, disc: "Disco {n}",
+      single: "Single", ep: "EP", compile: "Coletânea",
+      play: "Ouvir prévia", pause: "Pausar", back: "Voltar", explicit: "Explícito", openAlbum: "Abrir álbum",
+      min: "{m} min", hmin: "{h} h {m} min",
+    },
+    in: {
+      search: "Cari di Deezer", tabTracks: "Lagu", tabAlbums: "Album",
+      topTracks: "Lagu teratas di Deezer", topAlbums: "Album teratas di Deezer",
+      noResults: "Tidak ada hasil", noResultsText: "Tidak ada hasil untuk “{q}”. Periksa ejaan atau coba kata lain.",
+      errorTitle: "Gagal memuat hasil", errorText: "Periksa koneksi Anda, lalu coba lagi.", retry: "Coba lagi",
+      missingBot: "?bot= tidak ada di URL: unduhan tidak akan berfungsi.",
+      download: "Unduh", downloadAlbum: "Unduh album", sent: "Terkirim ke obrolan",
+      tracks: { other: "{n} lagu" }, disc: "Disk {n}",
+      single: "Single", ep: "EP", compile: "Kompilasi",
+      play: "Putar cuplikan", pause: "Jeda", back: "Kembali", explicit: "Eksplisit", openAlbum: "Buka album",
+      min: "{m} mnt", hmin: "{h} j {m} mnt",
+    },
+    de: {
+      search: "Auf Deezer suchen", tabTracks: "Titel", tabAlbums: "Alben",
+      topTracks: "Top-Titel auf Deezer", topAlbums: "Top-Alben auf Deezer",
+      noResults: "Keine Ergebnisse", noResultsText: "Nichts gefunden für „{q}“. Prüfe die Schreibweise oder versuche andere Wörter.",
+      errorTitle: "Ergebnisse konnten nicht geladen werden", errorText: "Prüfe deine Verbindung und versuche es erneut.", retry: "Erneut versuchen",
+      missingBot: "?bot= fehlt in der URL: Downloads funktionieren nicht.",
+      download: "Herunterladen", downloadAlbum: "Album herunterladen", sent: "An den Chat gesendet",
+      tracks: { one: "{n} Titel", other: "{n} Titel" }, disc: "CD {n}",
+      single: "Single", ep: "EP", compile: "Compilation",
+      play: "Hörprobe abspielen", pause: "Pausieren", back: "Zurück", explicit: "Explizit", openAlbum: "Album öffnen",
+      min: "{m} Min.", hmin: "{h} Std. {m} Min.",
+    },
+    zh: {
+      search: "搜索 Deezer", tabTracks: "单曲", tabAlbums: "专辑",
+      topTracks: "Deezer 热门单曲", topAlbums: "Deezer 热门专辑",
+      noResults: "没有结果", noResultsText: "未找到与“{q}”相关的内容。请检查拼写或换个关键词。",
+      errorTitle: "无法加载结果", errorText: "请检查网络连接后重试。", retry: "重试",
+      missingBot: "网址中缺少 ?bot=：无法下载。",
+      download: "下载", downloadAlbum: "下载专辑", sent: "已发送到聊天",
+      tracks: { other: "{n} 首歌曲" }, disc: "第 {n} 张碟",
+      single: "单曲", ep: "EP", compile: "合辑",
+      play: "试听", pause: "暂停", back: "返回", explicit: "含露骨内容", openAlbum: "打开专辑",
+      min: "{m} 分钟", hmin: "{h} 小时 {m} 分钟",
+    },
+    ar: {
+      search: "ابحث في Deezer", tabTracks: "المسارات", tabAlbums: "الألبومات",
+      topTracks: "أشهر المسارات على Deezer", topAlbums: "أشهر الألبومات على Deezer",
+      noResults: "لا توجد نتائج", noResultsText: "لم يتم العثور على شيء لـ «{q}». تحقق من الإملاء أو جرّب كلمات أخرى.",
+      errorTitle: "تعذّر تحميل النتائج", errorText: "تحقق من اتصالك ثم حاول مرة أخرى.", retry: "إعادة المحاولة",
+      missingBot: "المعامل ?bot= غير موجود في الرابط: لن تعمل التنزيلات.",
+      download: "تنزيل", downloadAlbum: "تنزيل الألبوم", sent: "تم الإرسال إلى المحادثة",
+      tracks: { zero: "{n} مسار", one: "مسار واحد", two: "مساران", few: "{n} مسارات", many: "{n} مسارًا", other: "{n} مسار" },
+      disc: "القرص {n}",
+      single: "أغنية منفردة", ep: "EP", compile: "تجميعة",
+      play: "تشغيل مقطع", pause: "إيقاف مؤقت", back: "رجوع", explicit: "محتوى صريح", openAlbum: "فتح الألبوم",
+      min: "{m} دقيقة", hmin: "{h} س {m} د",
+    },
+  };
+
+  // Telegram sends "id" for Indonesian, but the bot calls it "in".
+  function pickLang() {
+    const candidates = [
+      new URLSearchParams(location.search).get("lang"),
+      tg?.initDataUnsafe?.user?.language_code,
+      navigator.language,
+    ];
+    for (const c of candidates) {
+      const code = (c || "").toLowerCase().split("-")[0];
+      const lang = code === "id" ? "in" : code;
+      if (STRINGS[lang]) return lang;
+    }
+    return "en";
+  }
+  const lang = pickLang();
+  const locale = lang === "in" ? "id" : lang;
+  const plural = new Intl.PluralRules(locale);
+  document.documentElement.lang = locale;
+  document.documentElement.dir = lang === "ar" ? "rtl" : "ltr";
+
+  function t(key, vars = {}) {
+    let s = STRINGS[lang][key] ?? STRINGS.en[key];
+    if (typeof s === "object") s = s[plural.select(vars.n)] ?? s.other;
+    return s.replace(/\{(\w+)\}/g, (_, k) => vars[k] ?? "");
+  }
+
+  // The bot name comes from the URL set in BotFather, so it is never in this public file.
+  // Bot usernames end in "bot", so a path like /index.html is not taken for one.
+  const botParam = new URLSearchParams(location.search).get("bot")
+    || location.pathname.match(/^\/(\w+)/)?.[1];
+  const bot = /^[a-z]\w{1,28}bot$/i.test(botParam || "") ? botParam : null;
+  let type = "track";
+  let jsonpCount = 0;
+
+  const $ = (id) => document.getElementById(id);
+  const player = $("player");
+  const downloaded = new Set();
+  const charts = {};
+  const CHART_TTL = 10 * 60 * 1000;
+  let playingId = null;
+
+  const ICONS = {
+    play: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.14v13.72a1 1 0 0 0 1.5.86l11-6.86a1 1 0 0 0 0-1.72l-11-6.86A1 1 0 0 0 8 5.14z"/></svg>',
+    pause: '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1.2"/><rect x="14" y="5" width="4" height="14" rx="1.2"/></svg>',
+    download: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11m0 0-4.5-4.5M12 15l4.5-4.5M5 19.5h14"/></svg>',
+    check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg>',
+    chevron: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m9 5 7 7-7 7"/></svg>',
+    back: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m15 5-7 7 7 7"/></svg>',
+    note: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l11-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="17" cy="16" r="3"/></svg>',
+    alert: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9.5"/><path d="M12 7.5v5.5M12 16.5v.01"/></svg>',
+  };
+
+  function h(tag, props = {}, ...children) {
+    const el = document.createElement(tag);
+    for (const [k, v] of Object.entries(props)) {
+      if (v == null || v === false) continue;
+      if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+      else if (k === "class") el.className = v;
+      else if (k === "html") el.innerHTML = v;
+      else el.setAttribute(k, v);
+    }
+    el.append(...children.filter((c) => c != null && c !== false));
+    return el;
+  }
+
+  const haptic = {
+    impact: (style) => supports("6.1") && tg.HapticFeedback.impactOccurred(style),
+    notify: (kind) => supports("6.1") && tg.HapticFeedback.notificationOccurred(kind),
+    select: () => supports("6.1") && tg.HapticFeedback.selectionChanged(),
+  };
+
+  const fmtTime = (s) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  const fmtLength = (s) => {
+    const m = Math.round(s / 60);
+    return m >= 60 ? t("hmin", { h: Math.floor(m / 60), m: m % 60 }) : t("min", { m });
+  };
+  const typeLabel = (rt) => ({ single: t("single"), ep: t("ep"), compile: t("compile") })[rt];
+
+  // api.deezer.com sends no CORS header, so fetch() is blocked. JSONP works.
+  function deezer(path, params) {
+    return new Promise((resolve, reject) => {
+      const cb = "dz_cb_" + jsonpCount++;
+      const script = document.createElement("script");
+      const query = new URLSearchParams({ ...params, output: "jsonp", callback: cb });
+      // A JSONP request that hangs never fires onerror, so give up after a while.
+      const timer = setTimeout(() => done(null, new Error("timeout")), 15000);
+      const done = (data, err) => {
+        clearTimeout(timer);
+        window[cb] = () => {};
+        script.remove();
+        if (err) reject(err);
+        else if (data?.error) reject(new Error(data.error.message || "Deezer error"));
+        else resolve(data);
+      };
+      window[cb] = (data) => done(data);
+      script.onerror = () => done(null, new Error("network error"));
+      script.src = `https://api.deezer.com/${path}?${query}`;
+      document.head.appendChild(script);
+    });
+  }
+
+  function dlButton(kind, id, label) {
+    const key = `${kind}_${id}`;
+    const done = downloaded.has(key);
+    return h("button", {
+      type: "button",
+      class: "dl" + (done ? " done" : ""),
+      "data-key": key,
+      "aria-label": done ? t("sent") : `${t("download")} ${label}`,
+      html: ICONS[done ? "check" : "download"],
+      onclick: () => download(kind, id),
+    });
+  }
+
+  function explicitBadge(item) {
+    return item.explicit_lyrics ? h("span", { class: "badge", title: t("explicit"), "aria-label": t("explicit") }, "E") : null;
+  }
+
+  function trackRow(track, inAlbum, albumArtist) {
+    const li = h("li", { class: "row" });
+    const toggle = () => togglePreview(track);
+    let lead;
+    if (inAlbum) {
+      const n = h("span", { class: "n" }, String(track.track_position ?? ""));
+      lead = track.preview
+        ? h("button", { type: "button", class: "num", "aria-label": t("play"), onclick: toggle }, n, h("span", { class: "ico" }))
+        : h("div", { class: "num" }, n);
+    } else {
+      const img = h("img", { src: track.album?.cover_medium || "", alt: "", loading: "lazy" });
+      lead = track.preview
+        ? h("button", { type: "button", class: "art", "aria-label": t("play"), onclick: toggle }, img, h("span", { class: "ico" }))
+        : h("div", { class: "art" }, img);
+    }
+
+    const sub = h("div", { class: "sub", dir: "auto" });
+    if (!inAlbum) {
+      const link = h("span", {
+        class: "album-link", role: "button", tabindex: "0", "aria-label": `${t("openAlbum")}: ${track.album.title}`,
+        onclick: (e) => { e.stopPropagation(); openAlbum({ ...track.album, artist: track.artist }); },
+        onkeydown: (e) => {
+          if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.currentTarget.click(); }
+        },
+      }, track.album.title);
+      sub.append(`${track.artist.name} · `, link);
+    } else if (track.artist?.name && track.artist.name !== albumArtist) {
+      sub.append(track.artist.name);
+    }
+
+    const meta = h("div", { class: "meta", onclick: track.preview ? toggle : null },
+      h("div", { class: "title", dir: "auto" }, explicitBadge(track), track.title),
+      sub.childNodes.length ? sub : null);
+    li.append(lead, meta,
+      h("span", { class: "dur", dir: "ltr" }, fmtTime(track.duration || 0)),
+      dlButton("track", track.id, track.title),
+      h("span", { class: "progress" }));
+    if (track.preview) li.dataset.preview = track.id;
+    return li;
+  }
+
+  function albumRow(album) {
+    const bits = [album.artist?.name, typeLabel(album.record_type),
+      album.nb_tracks ? t("tracks", { n: album.nb_tracks }) : null].filter(Boolean);
+    return h("li", { class: "row" },
+      h("button", { type: "button", class: "row-main", onclick: () => openAlbum(album) },
+        h("div", { class: "art" }, h("img", { src: album.cover_medium || "", alt: "", loading: "lazy" })),
+        h("div", { class: "meta" },
+          h("div", { class: "title", dir: "auto" }, explicitBadge(album), album.title),
+          h("div", { class: "sub", dir: "auto" }, bits.join(" · "))),
+        h("span", { class: "chev", html: ICONS.chevron })),
+      dlButton("album", album.id, album.title));
+  }
+
+  function skeleton(n) {
+    return Array.from({ length: n }, () => h("li", { class: "row skel" },
+      h("div", { class: "art" }),
+      h("div", { class: "meta" }, h("div", { class: "line" }), h("div", { class: "line" }))));
+  }
+
+  function showState(box, kind, text, onRetry) {
+    box.replaceChildren(
+      h("span", { html: ICONS[kind === "error" ? "alert" : "note"] }),
+      h("strong", {}, t(kind === "error" ? "errorTitle" : "noResults")),
+      h("p", {}, text));
+    if (onRetry) box.append(h("button", { type: "button", onclick: onRetry }, t("retry")));
+    box.hidden = false;
+  }
+
+  let searchId = 0;
+  let debounce;
+
+  async function search() {
+    clearTimeout(debounce);
+    const q = $("q").value.trim();
+    const kind = type;
+    const id = ++searchId;
+    const list = $("results");
+    $("state").hidden = true;
+    $("busy").hidden = !q;
+    if (list.children.length) list.classList.add("stale");
+    else list.replaceChildren(...skeleton(8));
+    try {
+      let items;
+      if (q) {
+        items = (await deezer(`search/${kind}`, { q, limit: 40 })).data;
+      } else {
+        // Preview links in the charts expire, so fetch them again after a while.
+        if (!charts[kind] || Date.now() - charts[kind].at > CHART_TTL) {
+          charts[kind] = { at: Date.now(), items: (await deezer(`chart/0/${kind}s`, { limit: 30 })).data };
+        }
+        items = charts[kind].items;
+      }
+      // A slower, older search must not replace the results of a newer one.
+      if (id !== searchId) return;
+      $("heading").textContent = q ? "" : t(kind === "track" ? "topTracks" : "topAlbums");
+      list.replaceChildren(...items.map((it) => kind === "track" ? trackRow(it, false) : albumRow(it)));
+      if (!items.length && q) showState($("state"), "empty", t("noResultsText", { q }));
+      stopOrphanPreview();
+      updatePlayUI();
+    } catch (e) {
+      if (id !== searchId) return;
+      list.replaceChildren();
+      stopOrphanPreview();
+      $("heading").textContent = "";
+      showState($("state"), "error", t("errorText"), search);
+    } finally {
+      if (id === searchId) {
+        $("busy").hidden = true;
+        list.classList.remove("stale");
+      }
+    }
+  }
+
+  function download(kind, id) {
+    if (!bot) {
+      haptic.notify("error");
+      // The notice sits in the search view, so the album view needs its own message.
+      if (!$("album-view").hidden) {
+        if (supports("6.2")) tg.showAlert(t("missingBot"));
+        else alert(t("missingBot"));
+      }
+      return;
+    }
+    stopPreview();
+    const key = `${kind}_${id}`;
+    downloaded.add(key);
+    document.querySelectorAll(`.dl[data-key="${key}"]`).forEach((b) => {
+      b.classList.add("done");
+      b.innerHTML = ICONS.check;
+      b.setAttribute("aria-label", t("sent"));
+    });
+    if (kind === "album" && currentAlbum?.id === id) renderAlbumButton();
+    haptic.notify("success");
+    const link = `https://t.me/${bot}?start=${key}`;
+    if (tg) tg.openTelegramLink(link);
+    else location.href = link;
+  }
+
+  function togglePreview(track) {
+    haptic.impact("light");
+    if (playingId === track.id) {
+      if (player.paused) player.play().catch(stopPreview);
+      else player.pause();
+      return;
+    }
+    playingId = track.id;
+    player.src = track.preview;
+    player.play().catch(() => { if (playingId === track.id) stopPreview(); });
+    updatePlayUI();
+  }
+
+  function stopPreview() {
+    if (playingId == null) return;
+    playingId = null;
+    player.pause();
+    player.removeAttribute("src");
+    player.load();
+    updatePlayUI();
+  }
+
+  // Without its row on screen, the user has no way to pause the preview.
+  function stopOrphanPreview() {
+    if (playingId != null && !$("results").querySelector(`[data-preview="${playingId}"]`)) stopPreview();
+  }
+
+  function updatePlayUI() {
+    const playing = playingId != null && !player.paused;
+    document.querySelectorAll("[data-preview]").forEach((row) => {
+      const on = row.dataset.preview === String(playingId);
+      row.classList.toggle("playing", on);
+      const ico = row.querySelector(".ico");
+      ico.innerHTML = ICONS[on && playing ? "pause" : "play"];
+      ico.parentElement.setAttribute("aria-label", t(on && playing ? "pause" : "play"));
+      if (!on) row.style.removeProperty("--p");
+    });
+  }
+
+  player.addEventListener("play", updatePlayUI);
+  player.addEventListener("pause", updatePlayUI);
+  player.addEventListener("ended", stopPreview);
+  player.addEventListener("error", () => { if (player.getAttribute("src")) stopPreview(); });
+  player.addEventListener("timeupdate", () => {
+    if (!player.duration) return;
+    const p = player.currentTime / player.duration;
+    document.querySelectorAll(`[data-preview="${playingId}"]`).forEach((row) => row.style.setProperty("--p", p));
+  });
+  document.addEventListener("visibilitychange", () => { if (document.hidden) stopPreview(); });
+  tg?.onEvent("deactivated", stopPreview);
+
+  let currentAlbum = null;
+  let albumReq = 0;
+  let savedScroll = 0;
+  const nativeBack = supports("6.1");
+
+  function renderAlbumButton() {
+    const done = downloaded.has(`album_${currentAlbum.id}`);
+    const btn = $("album-dl");
+    btn.classList.toggle("done", done);
+    btn.innerHTML = ICONS[done ? "check" : "download"];
+    btn.append(t(done ? "sent" : "downloadAlbum"));
+  }
+
+  async function openAlbum(stub) {
+    stopPreview();
+    haptic.impact("light");
+    currentAlbum = stub;
+    const id = ++albumReq;
+    // The retry button calls this again from the album view: keep the search position.
+    if ($("album-view").hidden) savedScroll = window.scrollY;
+    $("search-view").hidden = true;
+    $("album-view").hidden = false;
+    if (nativeBack) tg.BackButton.show();
+    else $("album-back").hidden = false;
+    window.scrollTo(0, 0);
+
+    $("album-cover").src = stub.cover_big || stub.cover_medium || "";
+    $("album-title").textContent = stub.title;
+    $("album-artist").textContent = stub.artist?.name || "";
+    $("album-facts").textContent = "";
+    $("album-state").hidden = true;
+    $("album-tracks").replaceChildren(...skeleton(6));
+    renderAlbumButton();
+
+    try {
+      const [album, tracks] = await Promise.all([
+        deezer(`album/${stub.id}`, {}),
+        deezer(`album/${stub.id}/tracks`, { limit: 500 }),
+      ]);
+      if (id !== albumReq) return;
+      currentAlbum = album;
+      $("album-cover").src = album.cover_big || $("album-cover").src;
+      $("album-title").textContent = album.title;
+      $("album-artist").textContent = album.artist?.name || "";
+      $("album-facts").textContent = [
+        album.release_date?.slice(0, 4),
+        typeLabel(album.record_type),
+        t("tracks", { n: album.nb_tracks ?? tracks.data.length }),
+        album.duration ? fmtLength(album.duration) : null,
+      ].filter(Boolean).join(" · ");
+      const multiDisc = tracks.data.some((x) => x.disk_number > 1);
+      const rows = [];
+      let disc = 0;
+      for (const track of tracks.data) {
+        if (multiDisc && track.disk_number !== disc) {
+          disc = track.disk_number;
+          rows.push(h("li", { class: "disc" }, t("disc", { n: disc })));
+        }
+        rows.push(trackRow(track, true, album.artist?.name));
+      }
+      $("album-tracks").replaceChildren(...rows);
+      updatePlayUI();
+    } catch (e) {
+      if (id !== albumReq) return;
+      $("album-tracks").replaceChildren();
+      showState($("album-state"), "error", t("errorText"), () => openAlbum(stub));
+    }
+  }
+
+  function closeAlbum() {
+    if ($("album-view").hidden) return;
+    stopPreview();
+    albumReq++;
+    currentAlbum = null;
+    $("album-view").hidden = true;
+    $("search-view").hidden = false;
+    if (nativeBack) tg.BackButton.hide();
+    $("album-back").hidden = true;
+    window.scrollTo(0, savedScroll);
+  }
+
+  if (nativeBack) tg.BackButton.onClick(closeAlbum);
+  $("album-back").onclick = closeAlbum;
+  $("album-back").innerHTML = ICONS.back;
+  $("album-back").append(t("back"));
+  $("album-dl").onclick = () => currentAlbum && download("album", currentAlbum.id);
+
+  document.querySelectorAll("[data-i18n]").forEach((el) => { el.textContent = t(el.dataset.i18n); });
+  $("q").placeholder = t("search");
+  $("q").setAttribute("aria-label", t("search"));
+  $("notice").textContent = t("missingBot");
+  $("notice").hidden = !!bot;
+
+  $("search-form").onsubmit = (e) => { e.preventDefault(); $("q").blur(); search(); };
+  $("q").addEventListener("input", () => {
+    clearTimeout(debounce);
+    // An empty field shows the charts at once, typing waits for a pause.
+    if (!$("q").value.trim()) search();
+    else debounce = setTimeout(search, 150);
+  });
+  document.querySelectorAll(".seg button").forEach((b) => {
+    b.onclick = () => {
+      if (b.dataset.type === type) return;
+      haptic.select();
+      document.querySelectorAll(".seg button").forEach((x) => x.setAttribute("aria-selected", String(x === b)));
+      type = b.dataset.type;
+      stopPreview();
+      $("results").replaceChildren();
+      search();
+    };
+  });
+
+  search();
+</script>
+</body>
+</html>
