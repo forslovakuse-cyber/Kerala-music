@@ -28,4 +28,4 @@ RUN if [ "$ENABLE_FLAC" = "0" ]; then \
       echo "FLAC : enabled"; \
     fi
 
-CMD sh -c "python3 -m http.server 8080 & python3 -m telegramusic"
+CMD ["sh", "-c", "python -m http.server 8080 & python -u main.py"]
